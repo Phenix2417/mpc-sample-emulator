@@ -1,11 +1,9 @@
-# Builds the MPC Remote APK on every push to main (or by hand: Actions > Build APK > Run workflow).
+# Backup build, by hand only (Actions > Build APK (backup, no Expo) > Run workflow). The normal build is build-eas.yml.
 # No Expo account needed: the Android project is generated with "expo prebuild" and built with Gradle.
 # The APK is attached to a release named "MPC Remote build N" (Releases, on the repository's main page).
-name: Build APK
+name: Build APK (backup, no Expo)
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 permissions:

@@ -1,8 +1,10 @@
 name: Build APK on Expo (EAS)
 
 # Needs the repository secret EXPO_TOKEN (Settings > Secrets and variables > Actions).
-# Run it from the Actions tab: "Build APK on Expo (EAS)" > Run workflow.
+# Runs on every push to main, or by hand: Actions > "Build APK on Expo (EAS)" > Run workflow.
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
 
 permissions:

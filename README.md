@@ -17,10 +17,12 @@ If that shows the MPC, the app will work too.
 
 ## Get the APK
 
-GitHub builds it automatically on every push to `main` (`.github/workflows/build-apk.yml`; no Expo account
-needed). On the phone, open the repository on github.com > **Releases** > the newest "MPC Remote build",
-download **MPC-Remote.apk** and install it (allow installing from your browser when Android asks).
-To build again without a change: **Actions** > **Build APK** > **Run workflow**.
+Every push to `main` is built on Expo's servers (`.github/workflows/build-eas.yml`). It needs the repository
+secret `EXPO_TOKEN` (Settings > Secrets and variables > Actions; make the token on expo.dev). On the phone, open
+the repository on github.com > **Releases** > the newest "MPC Remote (Expo build N)", download **MPC-Remote.apk**
+and install it (allow installing from your browser when Android asks).
+To build again without a change: **Actions** > **Build APK on Expo (EAS)** > **Run workflow**.
+Backup without Expo: **Actions** > **Build APK (backup, no Expo)** > **Run workflow**.
 
 ## Layout
 
