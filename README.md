@@ -27,6 +27,18 @@ and install it (allow installing from your browser when Android asks).
 To build again without a change: **Actions** > **Build APK on Expo (EAS)** > **Run workflow**.
 Backup without Expo: **Actions** > **Build APK (backup, no Expo)** > **Run workflow**.
 
+## Open in Expo Go (no APK)
+
+The repository also runs as an Expo development server on Railway, so **Expo Go** can open the app from a link.
+
+1. On railway.com: **New Project > Deploy from GitHub repo > mpc-sample-emulator**. It builds with the `Dockerfile`.
+2. In the service: **Settings > Networking > Generate Domain**, port **8081** if it asks.
+3. On the phone, in Expo Go: **Enter URL manually** > `exps://<that domain>` (for example `exps://mpc-remote.up.railway.app`).
+   The deploy log prints the exact address.
+
+Expo Go has to match the app's Expo SDK (58). The first load takes a little while (the server builds the app).
+In Expo Go, opening the Linux Terminal automatically may not work (that needs the installed app); start the MPC yourself.
+
 ## Layout
 
 The kit serves the layout, so the app always matches the kit you run (no app update needed when the kit
