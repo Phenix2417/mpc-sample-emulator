@@ -1,0 +1,37 @@
+# MPC Remote
+
+A full-screen control surface for Akai's MPC Sample program running in the Pixel's Linux Terminal
+(via `mpc-pixel-kit`). The MPC itself keeps running in the Linux Terminal; this app shows its screen
+and sends your pads, buttons and knobs to it. Sound plays from the Linux Terminal as before.
+
+The app contains no Akai software. It connects to the kit's helper at `127.0.0.1:8765`.
+
+## Use it
+
+1. In the Linux Terminal: `cd ~/mpc-pixel-kit && ./4-run.sh`
+2. If the Terminal asks whether to allow port 8765, allow it.
+3. Open **MPC Remote**.
+
+Quick test without installing anything: open Chrome on the phone at `http://127.0.0.1:8765`.
+If that shows the MPC, the app will work too.
+
+## Get the APK
+
+GitHub builds it automatically on every push to `main` (`.github/workflows/build-apk.yml`; no Expo account
+needed). On the phone, open the repository on github.com > **Releases** > the newest "MPC Remote build",
+download **MPC-Remote.apk** and install it (allow installing from your browser when Android asks).
+To build again without a change: **Actions** > **Build APK** > **Run workflow**.
+
+## Layout
+
+The kit serves the layout, so the app always matches the kit you run (no app update needed when the kit
+changes): the MPC screen on top (its top boxes are B1/B2/B3), K1–K3 and the encoder, the button groups,
+SHIFT / PAD BANK / fader / ERASE / NOTE REPEAT beside the 16 pads, and the transport row. Pads and buttons
+light up as the MPC sets them. The top of the screen is kept clear of the camera; status and navigation
+bars are hidden (swipe from an edge to show them for a moment).
+
+## Sound
+
+The MPC still makes its sound in the Linux Terminal. If the sound stops while MPC Remote is in front,
+Android has paused the Terminal in the background: use split screen (Terminal small, MPC Remote large),
+or switch back to the Terminal.

@@ -1,0 +1,54 @@
+# Builds the MPC Remote APK on every push to main (or by hand: Actions > Build APK > Run workflow).
+# No Expo account needed: the Android project is generated with "expo prebuild" and built with Gradle.
+# The APK is attached to a release named "MPC Remote build N" (Releases, on the repository's main page).
+name: Build APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Install
+        run: npm ci
+
+      - name: Generate the Android project
+        run: npx expo prebuild --platform android --clean --no-install
+
+      - name: Build the APK
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleRelease --no-daemon
+          cp app/build/outputs/apk/release/app-release.apk "$GITHUB_WORKSPACE/MPC-Remote.apk"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MPC-Remote-apk
+          path: MPC-Remote.apk
+
+      - name: Publish as a release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "build-${{ github.run_number }}" MPC-Remote.apk \
+            --title "MPC Remote build ${{ github.run_number }}" \
+            --notes "Built from ${{ github.sha }}. Download MPC-Remote.apk on the phone and install it."
