@@ -39,6 +39,17 @@ function openTerminal() {
   return false;
 }
 
+// The page keeps itself clear of the camera with env(safe-area-inset-top), and the app used to add its own
+// gap as well (twice the space, and the pads shrank to fit). Now only the app's measured camera gap is used.
+const fullScreen = (top) => `(function () {
+  var s = document.getElementById('app-fs') || document.createElement('style');
+  s.id = 'app-fs';
+  s.textContent = '#app { padding-top: ${Math.round(top)}px !important; }';
+  document.head.appendChild(s);
+  window.dispatchEvent(new Event('resize'));
+  setTimeout(function () { window.dispatchEvent(new Event('resize')); }, 300);
+})(); true;`;
+
 function Remote() {
   useKeepAwake();
   const insets = useSafeAreaInsets();
@@ -81,8 +92,8 @@ function Remote() {
   const startAgain = useCallback(() => { opened.current = false; setState('checking'); }, []);
 
   return (
-    // the top inset keeps the MPC screen clear of the phone's camera
-    <View style={[styles.root, { paddingTop: insets.top }]}>
+    // the page fills the whole display; only its top is kept clear of the camera (set below, once)
+    <View style={styles.root}>
       <StatusBar hidden style="light" />
       <NavigationBar hidden style="light" />
       {state !== 'ready' ? (
@@ -119,6 +130,7 @@ function Remote() {
           key={key}
           ref={web}
           source={{ uri: `http://${address}/` }}
+          injectedJavaScript={fullScreen(insets.top)}
           style={styles.web}
           originWhitelist={['*']}
           javaScriptEnabled
