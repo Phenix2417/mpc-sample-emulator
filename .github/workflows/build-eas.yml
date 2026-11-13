@@ -5,6 +5,7 @@ name: Build APK on Expo (EAS)
 on:
   push:
     branches: [main]
+    paths-ignore: ['README.md', 'Dockerfile', '.dockerignore', 'railway.json']
   workflow_dispatch:
 
 permissions:
