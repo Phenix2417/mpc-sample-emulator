@@ -8,9 +8,12 @@ The app contains no Akai software. It connects to the kit's helper at `127.0.0.1
 
 ## Use it
 
-1. In the Linux Terminal: `cd ~/mpc-pixel-kit && ./4-run.sh`
-2. If the Terminal asks whether to allow port 8765, allow it.
-3. Open **MPC Remote**.
+1. Once, in the Linux Terminal: `~/mpc-pixel-kit/autostart.sh on` (the MPC then starts whenever the Terminal opens).
+2. Open **MPC Remote**. If the MPC isn't running, the app opens the Terminal, which starts it; switch back to the
+   app and the MPC appears when it is up (about 20 s).
+3. If the Terminal asks whether to allow port 8765, allow it.
+
+Without autostart, start it yourself: `cd ~/mpc-pixel-kit && ./4-run.sh`.
 
 Quick test without installing anything: open Chrome on the phone at `http://127.0.0.1:8765`.
 If that shows the MPC, the app will work too.
