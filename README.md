@@ -11,6 +11,14 @@ It behaves like the hardware:
 
 Use it to play the MPC Sample on your phone, or to test mods and custom OSes before you install them on a real unit.
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/Phenix2417/mpc-sample-emulator/main/docs/sampleboot.png" alt="SampleBoot's boot menu showing SampQOL 0.3.0, with the touch control panel below" width="280">
+  &nbsp;&nbsp;
+  <img src="https://raw.githubusercontent.com/Phenix2417/mpc-sample-emulator/main/docs/stock.png" alt="The stock MPC Sample sequencer in step edit, with the touch control panel below" width="280">
+  <br>
+  <sub>Left: SampleBoot's boot menu, choosing SampQOL. Right: the stock firmware's sequencer.</sub>
+</p>
+
 > **No Akai software is included.** You download the official updater from Akai yourself, and it is unpacked on your
 > phone only. Don't share the `work/` folder the kit creates: it contains Akai's firmware.
 > This project is not affiliated with or endorsed by Akai Professional or inMusic.
