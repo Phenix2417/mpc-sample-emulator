@@ -27,7 +27,7 @@ HERE="${MPC_HOME:-$(cd "$(dirname "$0")" && pwd)}"
 WORK="$HERE/work"; ROOT="$WORK/rootfs"; OUT="$WORK/run"; SD="$ROOT/media/az01-internal-sd"; PIDF="$WORK/run.pid"
 SHARED="${MPC_SHARED:-/mnt/shared}"; CARD="${MPC_EXTERNAL:-$SHARED/MPC-Sample}"
 FW_1_3_0=44507c7a7d3029c411b2e3780ea286ca3e08b7e3ffd7b5047d52f73bf5299d1f   # first 4 KB of the 1.3.0 program
-INSTALL_CMD='command -v unzip >/dev/null || { sudo apt-get update; sudo apt-get install -y unzip; }; cd ~ && ls -tr /mnt/shared/mpc-pixel-kit*.zip /mnt/shared/*/mpc-pixel-kit*.zip 2>/dev/null | while read -r z; do unzip -oq "$z"; done; cd ~/mpc-pixel-kit && ./mpc install'
+INSTALL_CMD='command -v unzip >/dev/null || { sudo apt-get update; sudo apt-get install -y unzip; }; cd ~ && ls -tr /mnt/shared/mpc-sample-emulator*.zip /mnt/shared/*/mpc-sample-emulator*.zip 2>/dev/null | while read -r z; do unzip -oq "$z"; done; cd ~/mpc-sample-emulator && ./mpc install'
 APP_RE="^/usr/bin/MPC Sample"
 cd "$HERE" || exit 1
 
@@ -38,6 +38,20 @@ for f in 1-setup.sh 2-extract.sh 4-run.sh install.sh update.sh autostart.sh setu
 done
 
 say() { echo "== $*"; }
+
+# the kit used to live in ~/mpc-pixel-kit: move its unpacked firmware here instead of unpacking it again (once)
+OLD="$(dirname "$HERE")/mpc-pixel-kit"
+if [ "$OLD" != "$HERE" ] && [ -f "$OLD/work/.extracted" ] && [ ! -e "$WORK" ]; then
+    for p in $(cat "$OLD/work/run.pid" 2>/dev/null) $(pgrep -f "[4]-run.sh"); do   # its MPC, if running: stop it
+        tr '\0' ' ' 2>/dev/null < "/proc/$p/cmdline" | grep -q 'mpc run\|4-run.sh' && sudo kill -TERM "$p" 2>/dev/null
+    done
+    for _ in $(seq 30); do grep -q " $OLD/work/" /proc/self/mountinfo || break; sleep 1; done
+    if grep -q " $OLD/work/" /proc/self/mountinfo; then
+        echo "!! $OLD is still in use, so its firmware wasn't moved. Close and reopen the Terminal, then run this again."
+    else
+        mv "$OLD/work" "$WORK" && echo "== Moved the unpacked firmware from $OLD here (you can delete that old folder now)"
+    fi
+fi
 die() { echo "!! $*"; exit 1; }
 nopty() {   # sudo without its own terminal device, so it never hits "unable to allocate pty: No such device"
     [ -f /etc/sudoers.d/010-mpc-nopty ] || { echo 'Defaults !use_pty' | sudo tee /etc/sudoers.d/010-mpc-nopty >/dev/null 2>&1 \
@@ -60,7 +74,7 @@ stop_run() {   # stop a run and let its own shutdown finish (it takes the card o
     return 0
 }
 updaters() {   # Akai MPC Sample updater candidates in the phone storage (top level and one folder deep, e.g. MPC-Sample)
-    find "$SHARED" -maxdepth 2 -type f \( -iname '*.exe' -o -iname '*.img' -o -iname '*mpc*sample*' \) ! -iname '*mpc-pixel-kit*' 2>/dev/null
+    find "$SHARED" -maxdepth 2 -type f \( -iname '*.exe' -o -iname '*.img' -o -iname '*mpc*sample*' \) ! -iname '*mpc-sample-emulator*' 2>/dev/null
 }
 
 # =============================== setup: every Linux tool the kit uses ===============================
@@ -200,7 +214,7 @@ cmd_card() (
                 p=$(prod_of "$top"); k=$(lc "$p")
                 { [ -z "${OZ[$k]:-}" ] || newer "$v" "${OV[$k]}"; } && { OZ[$k]="$z"; OV[$k]="$v"; ON[$k]="$p"; }
             fi
-        done < <(find "$d" -maxdepth 1 -type f -iname '*.zip' ! -iname 'mpc-pixel-kit*' 2>/dev/null)
+        done < <(find "$d" -maxdepth 1 -type f -iname '*.zip' ! -iname 'mpc-sample-emulator*' 2>/dev/null)
     done
     [ -n "$SB" ] || [ "${#OZ[@]}" -gt 0 ] || { say "Card: no SampleBoot or OS zips - nothing to set up"; exit 0; }
     T=$(mktemp -d); trap 'rm -rf "$T"' EXIT   # temporary unpacking folder only
@@ -262,17 +276,17 @@ cmd_bundle() (
     fi
     [ -f "$FW" ] || die "No Akai MPC Sample updater found (needed so the new phone needs no download)"
     say "Akai updater: $FW"
-    VER=$(ls -t "$SHARED"/mpc-pixel-kit-v*.zip "$SHARED"/*/mpc-pixel-kit-v*.zip 2>/dev/null | grep -vi -- '-full' | head -1 | sed -E 's/.*-(v[0-9][0-9.]*)\.zip$/\1/')
-    OUTZ="$CARD/mpc-pixel-kit-FULL-${VER:-$(date +%Y%m%d)}.zip"
-    S=$(mktemp -d); trap 'rm -rf "$S"' EXIT; K="$S/mpc-pixel-kit"; mkdir -p "$K/bundle"
+    VER=$(ls -t "$SHARED"/mpc-sample-emulator-v*.zip "$SHARED"/*/mpc-sample-emulator-v*.zip 2>/dev/null | grep -vi -- '-full' | head -1 | sed -E 's/.*-(v[0-9][0-9.]*)\.zip$/\1/')
+    OUTZ="$CARD/mpc-sample-emulator-FULL-${VER:-$(date +%Y%m%d)}.zip"
+    S=$(mktemp -d); trap 'rm -rf "$S"' EXIT; K="$S/mpc-sample-emulator"; mkdir -p "$K/bundle"
     ( cd "$HERE" && tar -cf - --exclude=./work --exclude=./bundle . ) | ( cd "$K" && tar -xf - )
     ln -s "$(readlink -f "$FW")" "$K/bundle/$(basename "$FW")"   # zip stores the file a link points to
     [ -d "$CARD/autorun" ] && cp -r "$CARD/autorun" "$K/bundle/autorun" && say "Card autorun: $CARD/autorun"
     while IFS= read -r z; do   # SampleBoot / OS zips: the new phone sets its card up from them
         unzip -Z1 "$z" 2>/dev/null | grep -qE '(^|/)autorun/autorun\.sh$' && ln -s "$z" "$K/bundle/$(basename "$z")" && say "Mod zip: $(basename "$z")"
-    done < <(find "$CARD" -maxdepth 1 -type f -iname '*.zip' ! -iname 'mpc-pixel-kit*' 2>/dev/null)
+    done < <(find "$CARD" -maxdepth 1 -type f -iname '*.zip' ! -iname 'mpc-sample-emulator*' 2>/dev/null)
     rm -f "$OUTZ"; say "Writing $OUTZ (a minute or two: the updater is large)"
-    ( cd "$S" && zip -r -q -1 "$OUTZ" mpc-pixel-kit ) || die "Could not write the zip (space on the phone?)"
+    ( cd "$S" && zip -r -q -1 "$OUTZ" mpc-sample-emulator ) || die "Could not write the zip (space on the phone?)"
     echo; echo "Done: $OUTZ ($(du -h "$OUTZ" | cut -f1)). On the new phone put it in the MPC-Sample folder (Internal storage) and run:"
     echo "  $INSTALL_CMD"
     echo "PRIVATE: contains Akai's firmware and SampQOL - for your own phones only, don't share or upload it."
@@ -318,9 +332,9 @@ cmd_update() {
         cp "$HERE/mpc" /tmp/mpc-update && MPC_HOME="$HERE" exec bash /tmp/mpc-update update "$@"
     fi
     stop_run
-    local Z; Z=$(ls -t "$SHARED"/mpc-pixel-kit*.zip "$SHARED"/*/mpc-pixel-kit*.zip 2>/dev/null | grep -vi -- '-full' | head -1)
-    [ -n "$Z" ] || Z=$(ls -t "$SHARED"/mpc-pixel-kit*.zip "$SHARED"/*/mpc-pixel-kit*.zip 2>/dev/null | head -1)   # FULL only if alone
-    [ -n "$Z" ] || die "No mpc-pixel-kit zip in the phone storage ($SHARED or a folder in it)"
+    local Z; Z=$(ls -t "$SHARED"/mpc-sample-emulator*.zip "$SHARED"/*/mpc-sample-emulator*.zip 2>/dev/null | grep -vi -- '-full' | head -1)
+    [ -n "$Z" ] || Z=$(ls -t "$SHARED"/mpc-sample-emulator*.zip "$SHARED"/*/mpc-sample-emulator*.zip 2>/dev/null | head -1)   # FULL only if alone
+    [ -n "$Z" ] || die "No mpc-sample-emulator zip in the phone storage ($SHARED or a folder in it)"
     say "Using: $Z"
     cd ~ && unzip -oq "$Z" && cd "$HERE" || die "Could not unpack $Z"
     ./mpc setup | grep -E '^(==|!!)'; ./mpc autostart on && exec ./mpc run "$@"
@@ -545,7 +559,7 @@ cmd_run() {
         REC='{ type file slave.pcm { type null } file "/dev/null" infile "/tmp/mpc-mic.fifo" format "raw" }'
         say "Sound through audiobridge; the mic records while SAMPLE RECORD is lit (sound off meanwhile)"
     else PLAY='{ type hw card $CARD device $DEV subdevice $SUBDEV }'; REC='{ type null }'; fi
-    printf '\n# added by mpc-pixel-kit: the program'"'"'s hw:N\npcm.!hw {\n    @args [ CARD DEV SUBDEV ]\n    @args.CARD { type string default "0" }\n    @args.DEV { type integer default 0 }\n    @args.SUBDEV { type integer default -1 }\n    type asym\n    playback.pcm %s\n    capture.pcm %s\n}\n' "$PLAY" "$REC" \
+    printf '\n# added by mpc-sample-emulator: the program'"'"'s hw:N\npcm.!hw {\n    @args [ CARD DEV SUBDEV ]\n    @args.CARD { type string default "0" }\n    @args.DEV { type integer default 0 }\n    @args.SUBDEV { type integer default -1 }\n    type asym\n    playback.pcm %s\n    capture.pcm %s\n}\n' "$PLAY" "$REC" \
         | sudo sh -c "cat '$ACONF.kit-orig' - > '$ACONF'"
 
     # ---- the control chip's other end ----
