@@ -56,18 +56,18 @@ Use it to play the MPC Sample on your phone, or to test mods and custom OSes bef
 3. Open the new **Terminal** app and let it download and install Debian (a few minutes).
 4. In the Terminal app, open its **settings**, then **Disk resize**, and set it to **8 GB or more**.
 
-### Step 2: Put the files in your Download folder
+### Step 2: Put the files in the MPC-Sample folder
 
-1. Open the **Files** app and create a folder called **`MPC-Sample`** inside **Download**. This folder becomes the
-   emulator's **microSD card**.
-2. Put **Akai's MPC Sample 1.3.0 updater** (`.exe`) in **Download/MPC-Sample**.
+1. Open the **Files** app, go to **Internal storage** (the top level, not Download) and create a folder called
+   **`MPC-Sample`**. This folder becomes the emulator's **microSD card**.
+2. Put **Akai's MPC Sample 1.3.0 updater** (`.exe`) in **Internal storage/MPC-Sample**.
 3. Optional: put **mod zips** in the same folder, for example `SampleBoot-1.0.2.zip` and `SampQOL-OS-v0.3.0.zip`.
    The installer sets the card up from them. Leave the zips as downloaded; don't unzip them.
 
 The Terminal sees this folder as **`/mnt/shared/MPC-Sample`**. It should look like this:
 
 ```
-Download/
+Internal storage/
 └── MPC-Sample/
     ├── MPC Sample 1.3.0 Updater.exe
     ├── SampleBoot-1.0.2.zip        (optional)
@@ -84,8 +84,8 @@ Open the **Terminal** app and paste **one** of these commands.
 sudo apt-get update && sudo apt-get install -y git && git clone https://github.com/Phenix2417/mpc-sample-emulator ~/mpc-pixel-kit && cd ~/mpc-pixel-kit && ./mpc install
 ```
 
-**Option B: from a kit zip.** Put the kit zip (`mpc-pixel-kit-v1.0.0.zip`, or a FULL zip) in Download or
-Download/MPC-Sample, then run:
+**Option B: from a kit zip.** Put the kit zip (`mpc-pixel-kit-v1.0.0.zip`, or a FULL zip) in the MPC-Sample
+folder, then run:
 
 ```
 command -v unzip >/dev/null || { sudo apt-get update; sudo apt-get install -y unzip; }; cd ~ && ls -tr /mnt/shared/mpc-pixel-kit*.zip /mnt/shared/*/mpc-pixel-kit*.zip 2>/dev/null | while read -r z; do unzip -oq "$z"; done; cd ~/mpc-pixel-kit && ./mpc install
@@ -97,7 +97,7 @@ The file names and version numbers of the zips don't matter: zips are recognised
 
 | Step | What happens |
 |---|---|
-| Pre-flight check | Checks the CPU, kit files, Download folder, `sudo`, free space, and finds the updater. Nothing is installed if a check fails; the message says how to fix it. |
+| Pre-flight check | Checks the CPU, kit files, phone storage, `sudo`, free space, and finds the updater. Nothing is installed if a check fails; the message says how to fix it. |
 | 1/5 Tools | Installs every Linux tool the kit needs: compiler, unpackers, bindfs, inotify-tools, ALSA headers… It installs only what's missing. |
 | 2/5 Firmware | Unpacks the firmware from the updater into `~/mpc-pixel-kit/work/rootfs` and checks that it is version 1.3.0. |
 | 3/5 Factory content | Puts the factory demo project in Internal > Projects > User > Factory Demo. |
@@ -129,14 +129,14 @@ At every start, new projects use the factory default template and the FADER cont
 
 ## The microSD card
 
-The card is your phone folder **Download/MPC-Sample**. It works like a real card:
+The card is the phone folder **Internal storage/MPC-Sample**. It works like a real card:
 
-- **Layout:** every folder in Download/MPC-Sample is at the **card root**, e.g. `autorun/` and any folder you add.
+- **Layout:** every folder in Internal storage/MPC-Sample is at the **card root**, e.g. `autorun/` and any folder you add.
   Loose files (zips, the updater) are left out.
 - **Your saves:** the MPC keeps its projects and samples in an `MPC-Sample/` folder on the card, as the hardware
-  does. They appear on the phone in **Download/MPC-Sample/MPC-Sample/**.
+  does. They appear on the phone in **Internal storage/MPC-Sample/MPC-Sample/**.
 - **Live in both directions:** what the MPC saves appears on the phone at once. A folder you copy into
-  Download/MPC-Sample appears on the card within about 2 seconds.
+  the MPC-Sample folder appears on the card within about 2 seconds.
 - **Where to find it:** in the MPC's browser, the card is **SD CARD**. SAMPLE SELECT > B2 switches to External.
 - **Safe:** the emulator never deletes files in your phone folder. All syncing copies.
 
@@ -152,7 +152,7 @@ starts straight away. If an autorun doesn't take over within 15 seconds, the sto
 
 ### Set up the card from zips (easiest)
 
-Put the zips in Download/MPC-Sample and run `./mpc card`. The installer also runs it.
+Put the zips in the MPC-Sample folder and run `./mpc card`. The installer also runs it.
 
 | Zip | Becomes |
 |---|---|
@@ -168,7 +168,7 @@ Put the zips in Download/MPC-Sample and run `./mpc card`. The installer also run
 
 ### Set up the card by hand
 
-- **One OS:** copy its `autorun` folder to **Download/MPC-Sample/autorun**.
+- **One OS:** copy its `autorun` folder to **Internal storage/MPC-Sample/autorun**.
 - **Several OSes with a menu:** use SampleBoot as `autorun`, and put each OS's `autorun` folder, renamed, in
   `autorun/mods/`, e.g. `autorun/mods/SampQOL 0.3.0/`.
 
@@ -199,7 +199,7 @@ Run these in `~/mpc-pixel-kit`:
 | `./mpc install [updater]` | One-step install (see above). Safe to run again. |
 | `./mpc run [seconds]` | Start the MPC, until Ctrl+C or for that many seconds. |
 | `./mpc stop` | Stop it. The card is released safely. |
-| `./mpc update` | Install the newest kit zip from Download, then start the MPC. |
+| `./mpc update` | Install the newest kit zip from the phone storage, then start the MPC. |
 | `./mpc autostart on` / `off` | Start the MPC whenever the Terminal opens, or don't. With no argument it shows which. |
 | `./mpc card [folder…]` | Set up the card's `autorun` from SampleBoot / OS zips. |
 | `./mpc bundle [updater]` | Make the private FULL zip for another phone. |
@@ -238,7 +238,7 @@ muted. The phone can't play and record at the same time.
 ## Updating
 
 - **Git install:** `cd ~/mpc-pixel-kit && ./mpc stop && git pull && ./mpc setup && ./mpc run`
-- **Zip install:** put the new kit zip in Download, then run `~/mpc-pixel-kit/mpc update`.
+- **Zip install:** put the new kit zip in the MPC-Sample folder, then run `~/mpc-pixel-kit/mpc update`.
 
 Your firmware, settings and card are kept.
 
@@ -252,14 +252,14 @@ On a phone where everything works, run:
 ~/mpc-pixel-kit/mpc bundle
 ```
 
-It writes **`Download/MPC-Sample/mpc-pixel-kit-FULL-<version>.zip`**, which contains:
+It writes **`MPC-Sample/mpc-pixel-kit-FULL-<version>.zip`** (in Internal storage), which contains:
 
 - the kit;
 - Akai's updater;
 - your card's `autorun` (SampleBoot with its OSes) and the mod zips.
 
-On the new phone, follow Step 1, put the FULL zip in Download/MPC-Sample and run the **Option B** command. Nothing
-else is downloaded. Your projects and samples aren't in the zip: copy `Download/MPC-Sample/MPC-Sample` across too if
+On the new phone, follow Step 1, put the FULL zip in Internal storage/MPC-Sample and run the **Option B** command. Nothing
+else is downloaded. Your projects and samples aren't in the zip: copy the `MPC-Sample/MPC-Sample` folder across too if
 you want them.
 
 > **Keep the FULL zip to yourself.** It contains Akai's firmware and third-party mods, which may be used on your own
@@ -272,13 +272,13 @@ you want them.
 | Problem | Fix |
 |---|---|
 | `sudo: unable to allocate pty: No such device` | Run `~/mpc-pixel-kit/mpc autostart off`, close the Terminal app fully (swipe it away), reopen it, then run `~/mpc-pixel-kit/mpc fix-sudo`. |
-| `No Akai MPC Sample updater found` | Put the official 1.3.0 updater in Download/MPC-Sample, or name it: `./mpc install "<path>"`. |
+| `No Akai MPC Sample updater found` | Put the official 1.3.0 updater in Internal storage/MPC-Sample, or name it: `./mpc install "<path>"`. |
 | `Free space: only … MB` | Terminal settings > Disk resize: 8 GB or more. |
 | `Still missing: …` while installing tools | Check the internet connection and run `./mpc setup` again. |
 | Nothing on screen | Tap the Terminal's **display icon**. Check `/tmp/mpc-run.log` (autostart) or the run's output. |
 | The MPC doesn't start, or stops | See `~/mpc-pixel-kit/work/run/app.log` and `work/run/fbshim.log`. |
 | A mod doesn't boot | See `work/run/script-runner.log` and the mod's own log on the card. `MPC_BOOT=off ./mpc run` starts the stock app without it. |
-| The Save page says "No SD card" | Make sure Download/MPC-Sample exists and contains at least one folder, then restart: `./mpc stop && ./mpc run`. |
+| The Save page says "No SD card" | Make sure Internal storage/MPC-Sample exists and contains at least one folder, then restart: `./mpc stop && ./mpc run`. |
 | "Disk Too Slow!" | Streaming large samples from the phone folder can be slow. Use a card folder in the Linux storage: `MPC_EXTERNAL=$HOME/mpc-sd ./mpc run`. |
 | Settings are in a bad state | `./mpc reset` moves them aside. Nothing is deleted. |
 
@@ -293,7 +293,7 @@ Stop the MPC first, so your phone folder isn't mapped into the kit while you del
 grep -q mpc-pixel-kit /proc/self/mountinfo && echo "Still mounted - close and reopen the Terminal first" || rm -rf ~/mpc-pixel-kit
 ```
 
-Your card (Download/MPC-Sample) and its projects stay on the phone.
+Your card (Internal storage/MPC-Sample) and its projects stay on the phone.
 
 ---
 

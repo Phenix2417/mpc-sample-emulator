@@ -849,7 +849,7 @@ int ioctl(int fd, unsigned long req, ...) {
 }
 
 /* ---------- external drive ----------
- * ./mpc run mounts the phone's Download folder at /media/az01-internal-sd, the MPC's SD card place. The program
+ * ./mpc run mounts the phone's MPC-Sample folder at /media/az01-internal-sd, the MPC's SD card place. The program
  * unmounts and removes drives there in some modes (SD Card Access); keep the phone folder mounted instead. */
 static int is_sd(const char *p) {
     static const char k[] = "az01-internal-sd";

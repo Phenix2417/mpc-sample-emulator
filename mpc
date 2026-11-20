@@ -3,7 +3,7 @@
 #
 #   ./mpc install [updater]   one-step install: tools, firmware, factory content, card, autostart, then run
 #   ./mpc run [seconds]       start the MPC (until Ctrl+C, or for that many seconds)
-#   ./mpc stop                stop it                  ./mpc update   newest kit zip in Download, then run
+#   ./mpc stop                stop it                  ./mpc update   newest kit zip from the phone, then run
 #   ./mpc autostart on|off    start it whenever the Terminal opens (no argument: show)
 #   ./mpc card [folder...]    set the card's autorun up from SampleBoot / OS zips (default: the card folder)
 #   ./mpc bundle [updater]    the private FULL zip: kit + Akai updater + your card's autorun, for another phone
@@ -31,7 +31,7 @@ INSTALL_CMD='command -v unzip >/dev/null || { sudo apt-get update; sudo apt-get 
 APP_RE="^/usr/bin/MPC Sample"
 cd "$HERE" || exit 1
 
-# files of older kits (before 1.0.0) (unpacked again from older zips in Download): replaced by mpc, mpc.py, addon.c, helpers.c
+# files of older kits (before 1.0.0) (unpacked again from older zips on the phone): replaced by mpc, mpc.py, addon.c, helpers.c
 for f in 1-setup.sh 2-extract.sh 4-run.sh install.sh update.sh autostart.sh setup-card.sh bundle.sh content.sh reset.sh \
          fix-sudo.sh az0x.py fitx.py defaults.py mpcctl.py edisks.py fbshim.c panel.c audiobridge.c devrelay.c; do
     [ -f "$HERE/$f" ] && rm -f "$HERE/$f"
@@ -59,7 +59,7 @@ stop_run() {   # stop a run and let its own shutdown finish (it takes the card o
     sudo pkill -f "[a]udiobridge "
     return 0
 }
-updaters() {   # Akai MPC Sample updater candidates in Download (one folder deep)
+updaters() {   # Akai MPC Sample updater candidates in the phone storage (top level and one folder deep, e.g. MPC-Sample)
     find "$SHARED" -maxdepth 2 -type f \( -iname '*.exe' -o -iname '*.img' -o -iname '*mpc*sample*' \) ! -iname '*mpc-pixel-kit*' 2>/dev/null
 }
 
@@ -273,7 +273,7 @@ cmd_bundle() (
     done < <(find "$CARD" -maxdepth 1 -type f -iname '*.zip' ! -iname 'mpc-pixel-kit*' 2>/dev/null)
     rm -f "$OUTZ"; say "Writing $OUTZ (a minute or two: the updater is large)"
     ( cd "$S" && zip -r -q -1 "$OUTZ" mpc-pixel-kit ) || die "Could not write the zip (space on the phone?)"
-    echo; echo "Done: $OUTZ ($(du -h "$OUTZ" | cut -f1)). On the new phone put it in Download/MPC-Sample and run:"
+    echo; echo "Done: $OUTZ ($(du -h "$OUTZ" | cut -f1)). On the new phone put it in the MPC-Sample folder (Internal storage) and run:"
     echo "  $INSTALL_CMD"
     echo "PRIVATE: contains Akai's firmware and SampQOL - for your own phones only, don't share or upload it."
 )
@@ -320,7 +320,7 @@ cmd_update() {
     stop_run
     local Z; Z=$(ls -t "$SHARED"/mpc-pixel-kit*.zip "$SHARED"/*/mpc-pixel-kit*.zip 2>/dev/null | grep -vi -- '-full' | head -1)
     [ -n "$Z" ] || Z=$(ls -t "$SHARED"/mpc-pixel-kit*.zip "$SHARED"/*/mpc-pixel-kit*.zip 2>/dev/null | head -1)   # FULL only if alone
-    [ -n "$Z" ] || die "No mpc-pixel-kit zip in the phone's Download folder"
+    [ -n "$Z" ] || die "No mpc-pixel-kit zip in the phone storage ($SHARED or a folder in it)"
     say "Using: $Z"
     cd ~ && unzip -oq "$Z" && cd "$HERE" || die "Could not unpack $Z"
     ./mpc setup | grep -E '^(==|!!)'; ./mpc autostart on && exec ./mpc run "$@"
@@ -334,7 +334,7 @@ cmd_install() {
     [ "$(uname -m)" = aarch64 ] && ok "CPU is ARM64" || bad "CPU is $(uname -m), not ARM64" "use the Pixel's Linux Terminal"
     local f MISS=""; for f in mpc.py addon.c helpers.c; do [ -f "$f" ] || MISS="$MISS $f"; done
     [ -z "$MISS" ] && ok "Kit files complete" || bad "Kit incomplete (missing:$MISS)" "unzip the kit zip again"
-    ls "$SHARED" >/dev/null 2>&1 && ok "Download folder reachable ($SHARED)" || bad "Can't reach $SHARED" "reopen the Terminal, or MPC_SHARED=<folder>"
+    ls "$SHARED" >/dev/null 2>&1 && ok "Phone storage reachable ($SHARED)" || bad "Can't reach $SHARED" "reopen the Terminal, or MPC_SHARED=<folder>"
     { sudo -n true 2>/dev/null || sudo true 2>/dev/null; } && ok "sudo works" || bad "sudo isn't working" "close and reopen the Terminal, then ./mpc fix-sudo"
     if [ -f "$WORK/.extracted" ]; then ok "Firmware already extracted (reused)"
     else
@@ -345,7 +345,7 @@ cmd_install() {
             local C; mapfile -t C < <(updaters)
             if [ "${#C[@]}" -eq 1 ]; then FW="${C[0]}"
             elif [ "${#C[@]}" -gt 1 ]; then bad "More than one possible updater" "name it: ./mpc install \"<path>\""; printf '         %s\n' "${C[@]}"
-            else bad "No Akai MPC Sample updater in $SHARED" "download the official 1.3.0 updater from akaipro.com into Download"; fi
+            else bad "No Akai MPC Sample updater in $SHARED" "download the official 1.3.0 updater from akaipro.com into the MPC-Sample folder (Internal storage)"; fi
         fi
         [ -z "$FW" ] || { [ -f "$FW" ] && ok "Akai updater: $FW" || bad "Updater not found: $FW"; }
     fi
