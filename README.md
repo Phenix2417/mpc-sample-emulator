@@ -74,10 +74,6 @@ Internal storage/
     └── SampQOL-OS-v0.3.0.zip       (optional)
 ```
 
-In the Files app:
-
-<img src="https://raw.githubusercontent.com/Phenix2417/mpc-sample-emulator/main/docs/mpc-sample-folder.png" alt="The MPC-Sample folder in Internal storage, with the MPC Sample 1.3.0 updater, SampleBoot and SampQOL zips" width="360">
-
 ### Step 3: Install
 
 Open the **Terminal** app and paste **one** of these commands.
