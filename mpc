@@ -1,0 +1,658 @@
+#!/bin/bash
+# mpc - Akai's official MPC Sample program in the Pixel's Linux Terminal. One command for everything:
+#
+#   ./mpc install [updater]   one-step install: tools, firmware, factory content, card, autostart, then run
+#   ./mpc run [seconds]       start the MPC (until Ctrl+C, or for that many seconds)
+#   ./mpc stop                stop it                  ./mpc update   newest kit zip in Download, then run
+#   ./mpc autostart on|off    start it whenever the Terminal opens (no argument: show)
+#   ./mpc card [folder...]    set the card's autorun up from SampleBoot / OS zips (default: the card folder)
+#   ./mpc bundle [updater]    the private FULL zip: kit + Akai updater + your card's autorun, for another phone
+#   ./mpc content [dir|zip]   factory demo (or your own factory content) into the MPC's internal storage
+#   ./mpc reset               MPC settings back to factory (moved to a backup folder, never deleted)
+#   ./mpc setup | extract <updater> | fix-sudo     the single install steps
+#
+# Options for run (before the command, e.g. PANEL=0 ./mpc run):
+#   MPC_EXTERNAL=<folder>|0  the microSD card (default: the phone folder /mnt/shared/MPC-Sample; 0 = no card)
+#   MPC_BOOT=off             start the stock app directly, without the card's autorun (default: like the hardware)
+#   MPC_BOOT_GRACE=<s>       how long an autorun gets to take over before the stock app starts (default 15)
+#   MPC_KEEP_TEMPLATE=1      keep your SAVE AS TEMPLATE template     MPC_KEEP_FADER=1  keep your fader choice
+#   PANEL=0                  no on-screen panel                     AUDIO16=0         no 16-bit conversion
+#   AUDIO_PERIOD=<n>         smallest sound block (default 512)     MPC_LOG=1         log all control MIDI
+#   AUDIO_BRIDGE=0           sound straight to the card (no mic)    MIC_GAIN=<n>      mic boost (2 = +6 dB)
+#
+# Safety: the kit never deletes anything in your phone folder. The card is kept in sync by copying only.
+set -uo pipefail
+export PATH="$PATH:/usr/sbin:/sbin"
+HERE="${MPC_HOME:-$(cd "$(dirname "$0")" && pwd)}"
+WORK="$HERE/work"; ROOT="$WORK/rootfs"; OUT="$WORK/run"; SD="$ROOT/media/az01-internal-sd"; PIDF="$WORK/run.pid"
+SHARED="${MPC_SHARED:-/mnt/shared}"; CARD="${MPC_EXTERNAL:-$SHARED/MPC-Sample}"
+FW_1_3_0=44507c7a7d3029c411b2e3780ea286ca3e08b7e3ffd7b5047d52f73bf5299d1f   # first 4 KB of the 1.3.0 program
+INSTALL_CMD='command -v unzip >/dev/null || { sudo apt-get update; sudo apt-get install -y unzip; }; cd ~ && ls -tr /mnt/shared/mpc-pixel-kit*.zip /mnt/shared/*/mpc-pixel-kit*.zip 2>/dev/null | while read -r z; do unzip -oq "$z"; done; cd ~/mpc-pixel-kit && ./mpc install'
+APP_RE="^/usr/bin/MPC Sample"
+cd "$HERE" || exit 1
+
+# files of older kits (before 1.0.0) (unpacked again from older zips in Download): replaced by mpc, mpc.py, addon.c, helpers.c
+for f in 1-setup.sh 2-extract.sh 4-run.sh install.sh update.sh autostart.sh setup-card.sh bundle.sh content.sh reset.sh \
+         fix-sudo.sh az0x.py fitx.py defaults.py mpcctl.py edisks.py fbshim.c panel.c audiobridge.c devrelay.c; do
+    [ -f "$HERE/$f" ] && rm -f "$HERE/$f"
+done
+
+say() { echo "== $*"; }
+die() { echo "!! $*"; exit 1; }
+nopty() {   # sudo without its own terminal device, so it never hits "unable to allocate pty: No such device"
+    [ -f /etc/sudoers.d/010-mpc-nopty ] || { echo 'Defaults !use_pty' | sudo tee /etc/sudoers.d/010-mpc-nopty >/dev/null 2>&1 \
+        && sudo chmod 440 /etc/sudoers.d/010-mpc-nopty 2>/dev/null; }
+}
+run_pids() {   # the running "./mpc run" (and an older kit's 4-run.sh), other than this one
+    local p; p=$(cat "$PIDF" 2>/dev/null)
+    [ -n "$p" ] && [ "$p" != "$$" ] && tr '\0' ' ' 2>/dev/null < "/proc/$p/cmdline" | grep -q 'mpc run' && echo "$p"
+    pgrep -f "[4]-run.sh"
+}
+running() { [ -n "$(run_pids)" ] || pgrep -f "$APP_RE" >/dev/null; }
+stop_run() {   # stop a run and let its own shutdown finish (it takes the card out safely)
+    local p; p=$(run_pids | tr '\n' ' ')
+    if [ -n "${p// /}" ]; then
+        sudo kill -TERM $p 2>/dev/null   # TERM: a background run ignores INT
+        for _ in $(seq 30); do [ -z "$(run_pids)" ] && break; sleep 1; done
+    fi
+    sudo pkill -9 -f "$APP_RE"; sudo pkill -f "[m]pc.py (ctl|disks)"; sudo pkill -f "[m]pcctl.py serve"; sudo pkill -f "[e]disks.py"
+    sudo pkill -f "[a]udiobridge "
+    return 0
+}
+updaters() {   # Akai MPC Sample updater candidates in Download (one folder deep)
+    find "$SHARED" -maxdepth 2 -type f \( -iname '*.exe' -o -iname '*.img' -o -iname '*mpc*sample*' \) ! -iname '*mpc-pixel-kit*' 2>/dev/null
+}
+
+# =============================== setup: every Linux tool the kit uses ===============================
+cmd_setup() {
+    [ "$(uname -m)" = aarch64 ] || echo "Warning: this is not ARM64 ($(uname -m)): the firmware unpacks, but the MPC can't run here."
+    nopty
+    # what the kit uses -> the Debian package with it (a command, or a file for headers)
+    local NEED="unzip:unzip zip:zip python3:python3 file:file 7z:p7zip-full xz:xz-utils zstd:zstd lz4:lz4 bzip2:bzip2
+        debugfs:e2fsprogs unsquashfs:squashfs-tools mount:mount findmnt:util-linux mountpoint:util-linux setsid:util-linux
+        flock:util-linux setarch:util-linux tar:tar find:findutils xargs:findutils sed:sed grep:grep awk:mawk cmp:diffutils
+        pgrep:procps pkill:procps sha256sum:coreutils od:coreutils mktemp:coreutils bindfs:bindfs fusermount3:fuse3
+        inotifywait:inotify-tools gcc:gcc /usr/include/stdio.h:libc6-dev /usr/include/linux/fb.h:linux-libc-dev
+        /usr/include/alsa/asoundlib.h:libasound2-dev"
+    missing() { local p; for p in $NEED; do
+        case "${p%%:*}" in /*) [ -e "${p%%:*}" ] ;; *) command -v "${p%%:*}" >/dev/null 2>&1 ;; esac || echo "${p#*:}"
+    done | sort -u | tr '\n' ' '; }
+    local M; M=$(missing)
+    if [ -n "${M// /}" ]; then
+        say "Installing the tools the kit needs: $M"
+        sudo apt-get update -q || echo "   (package list update had problems - trying anyway)"
+        # shellcheck disable=SC2086
+        sudo apt-get install -y -q $M || sudo apt-get install -y -q --fix-missing $M
+        M=$(missing); [ -z "${M// /}" ] || { echo "!! Still missing: $M - check the internet connection, then ./mpc setup"; return 1; }
+    fi
+    grep -qs "^user_allow_other" /etc/fuse.conf || echo user_allow_other | sudo tee -a /etc/fuse.conf >/dev/null   # card mapping
+    say "Tools: all present"
+}
+
+# =============================== extract: the firmware into work/rootfs ===============================
+cmd_extract() {
+    local SRC="${1:-}" IMG="" FMT="" f
+    [ -f "$SRC" ] || { echo "Usage: ./mpc extract <updater .exe | update.img | .zip>"; return 2; }
+    mkdir -p "$WORK"; rm -rf "$WORK/unpack" "$WORK/payloads"; mkdir -p "$WORK/unpack" "$WORK/payloads"
+    say "Input: $SRC ($(stat -c %s "$SRC") bytes)"
+    # the MPC Sample updater holds update.img in Akai's "AZ0x" format; other inMusic devices use U-Boot FIT
+    magic() { head -c4 "$1" | od -An -tx1 | tr -d ' \n'; }
+    pick() { case "$(magic "$1")" in 415a3078) IMG="$1"; FMT=az0x;; d00dfeed) IMG="$1"; FMT=fit;; esac; }
+    bigfiles() { find "$WORK/unpack" -type f -size +5M -printf '%s\t%p\n' 2>/dev/null | sort -rn | cut -f2-; }
+    pick "$SRC"
+    if [ -z "$IMG" ]; then
+        say "Unpacking it with 7-Zip"
+        7z x -y -o"$WORK/unpack" "$SRC" >/dev/null || echo "   (7-Zip could not unpack everything; continuing)"
+        while IFS= read -r f; do pick "$f"; [ "$FMT" = az0x ] && break; done < <(bigfiles)
+    fi
+    if [ -z "$IMG" ]; then
+        say "No firmware image among the unpacked files: scanning the bytes for a FIT container"
+        while IFS= read -r f; do
+            [ -n "$(python3 "$HERE/mpc.py" fitscan "$f" "$WORK/update.img")" ] && { IMG="$WORK/update.img"; FMT=fit; break; }
+        done < <(echo "$SRC"; bigfiles)
+    fi
+    [ -n "$IMG" ] || { echo "!! No firmware container found in $SRC"; return 1; }
+    say "Firmware container: $IMG ($FMT). Extracting (a few minutes)"
+    python3 "$HERE/mpc.py" "$FMT" "$IMG" "$WORK/payloads" || return 1
+    local R; R=$(python3 "$HERE/mpc.py" rootfs "$WORK/payloads/payloads.json")
+    [ -n "$R" ] || { echo "!! No ext4 or squashfs file system among the parts (work/payloads/payloads.json)"; return 1; }
+    local FILE="${R%|*}" KIND="${R#*|}"
+    say "Root file system: $FILE ($KIND)"
+    # NEVER delete through a mount: the card (your phone folder) is mounted inside work/rootfs while the MPC runs.
+    # Stop the MPC, unmount everything inside, refuse if anything is still mounted, and stay on this disk.
+    if [ -d "$ROOT" ]; then
+        stop_run
+        awk -v d="$ROOT" 'index($5,d)==1 {print $5}' /proc/self/mountinfo | sort -r | while IFS= read -r m; do
+            m=$(printf '%b' "$m"); fusermount3 -u "$m" 2>/dev/null || sudo umount -l "$m" 2>/dev/null
+        done
+        if awk -v d="$ROOT" 'index($5,d)==1 {f=1} END{exit !f}' /proc/self/mountinfo; then
+            echo "!! Something is still mounted inside work/rootfs, so it is NOT deleted (your card could be in there)."
+            echo "   Close and reopen the Terminal app, then run this again."; return 1
+        fi
+        sudo rm -rf --one-file-system "$ROOT"
+    fi
+    mkdir -p "$ROOT"
+    if [ "$KIND" = squashfs ]; then unsquashfs -f -d "$ROOT" "$FILE" >/dev/null || return 1
+    else
+        for f in $(debugfs -R "ls -p /" "$FILE" 2>/dev/null | awk -F/ 'NF>5 && $6!="." && $6!=".." && $6!="lost+found"{print $6}'); do
+            debugfs -R "rdump \"/$f\" \"$ROOT\"" "$FILE" >/dev/null 2>&1 || echo "   could not copy /$f"
+        done
+    fi
+    say "Unpacked: $(du -sh "$ROOT" | cut -f1) in work/rootfs"
+    local APP="$ROOT/usr/bin/MPC Sample"
+    [ -f "$APP" ] || { echo "!! usr/bin/MPC Sample is not in this file system"; return 1; }
+    if [ "$(head -c 4096 "$APP" | sha256sum | cut -d' ' -f1)" = "$FW_1_3_0" ]; then say "MPC Sample program: 1.3.0"
+    else echo "!! This is not the 1.3.0 MPC Sample program: the kit is made for 1.3.0."; fi
+    rm -rf "$WORK/unpack" "$WORK/payloads" "$WORK/update.img"; : > "$WORK/.extracted"   # the unpacked system is all that's needed
+}
+
+# =============================== content: factory demo / your own factory content ===============================
+cmd_content() {
+    [ -d "$ROOT" ] || die "No extracted firmware: ./mpc install first"
+    stop_run
+    local DEST="$ROOT/media/acvs-content" SRC="${1:-}"
+    if [ -n "$SRC" ]; then   # factory content you have (a folder or a zip) -> "Internal" in the browser
+        if [ -d "$SRC" ]; then sudo mkdir -p "$DEST" && sudo cp -a "$SRC/." "$DEST/"
+        elif [ -f "$SRC" ]; then
+            local T="$WORK/content-unpack"; rm -rf "$T"; mkdir -p "$T"
+            7z x -y -o"$T" "$SRC" >/dev/null || unzip -o -q "$SRC" -d "$T"
+            sudo mkdir -p "$DEST" && sudo cp -a "$T/." "$DEST/"; rm -rf "$T"
+        else die "$SRC not found"; fi
+        say "Factory content from $SRC: Internal in SAMPLE SELECT"; return 0
+    fi
+    # the demo project the firmware keeps for start-up -> Internal > Projects > User > Factory Demo, its samples in
+    # Internal > Samples > User > Factory (the MPC lists only the User folders of /data/UserContent)
+    local DEMO="$ROOT/usr/share/Akai/AC50/TempProjects" UC="$ROOT/data/UserContent"
+    [ -f "$DEMO/Temp-Project.xpj" ] || { say "No factory demo in this firmware"; return 0; }
+    local P="$UC/Projects/User" S="$UC/Samples/User/Factory" w
+    sudo mkdir -p "$P" "$S"; sudo rm -rf "$P/Factory Demo_[ProjectData]"
+    sudo cp -al "$DEMO/Temp-Project_[ProjectData]" "$P/Factory Demo_[ProjectData]" 2>/dev/null || sudo cp -a "$DEMO/Temp-Project_[ProjectData]" "$P/Factory Demo_[ProjectData]"
+    sudo cp -a "$DEMO/Temp-Project.xpj" "$P/Factory Demo.xpj"   # the MPC finds <name>_[ProjectData] by the file name
+    for w in "$DEMO/Temp-Project_[ProjectData]"/*.wav; do sudo ln -f "$w" "$S/" 2>/dev/null || sudo cp -a "$w" "$S/"; done
+    say "Factory demo: Internal > Projects > User > Factory Demo ($(sudo ls "$S" | wc -l) samples in Samples > User > Factory)"
+}
+
+# =============================== card: autorun from SampleBoot / OS zips ===============================
+# File names and versions don't matter: zips are recognised by what's inside, the newest version wins.
+#  - a SampleBoot zip -> the card's autorun (the boot menu); a newer one updates it in place, keeping its settings
+#    (sampleboot.conf) and every OS in mods/
+#  - another OS zip   -> menu entry autorun/mods/"<Name> <version>" (SampleBoot's naming, e.g. "SampQOL 0.3.0"); a newer
+#    version is added and the older entry renamed "_SampQOL 0.3.0" (hidden by SampleBoot, not deleted)
+#  - no SampleBoot and one OS -> that OS is the card's autorun.  Nothing on the card is ever deleted.
+cmd_card() (
+    [ $# -gt 0 ] && SRC=("$@") || SRC=("$CARD" "$HERE/bundle")
+    ver_of()  { grep -oE '[0-9]+(\.[0-9]+)+' <<< "$1" | tail -1; }                                    # SampQOL-OS-v0.3.0 -> 0.3.0
+    prod_of() { sed -E 's/[-_ ]*[vV]?[0-9]+(\.[0-9]+)+.*$//; s/[-_ ]+OS$//I; s/^[_.]+//' <<< "$1"; }   # -> SampQOL
+    newer()   { [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -1)" = "$1" ]; }
+    lc()      { tr '[:upper:]' '[:lower:]' <<< "$1"; }
+    shortest() { awk '{print length, $0}' | sort -n | head -1 | cut -d' ' -f2-; }
+    SB=""; SBV=""; declare -A OZ=() OV=() ON=()
+    for d in "${SRC[@]}"; do
+        [ -d "$d" ] || continue
+        while IFS= read -r z; do
+            L=$(unzip -Z1 "$z" 2>/dev/null) || continue
+            A=$(grep -E '(^|/)autorun/autorun\.sh$' <<< "$L" | shortest); [ -n "$A" ] || continue   # not an OS zip
+            top=$(cut -d/ -f1 <<< "$A"); [ "$top" = autorun ] && top=$(basename "$z" .zip)
+            v=$(ver_of "$top"); [ -n "$v" ] || v=$(ver_of "$(basename "$z")")
+            if grep -qE '(^|/)autorun/sampleboot/sampleboot-ui$' <<< "$L"; then
+                { [ -z "$SB" ] || newer "$v" "$SBV"; } && { SB="$z"; SBV="$v"; }
+            else
+                p=$(prod_of "$top"); k=$(lc "$p")
+                { [ -z "${OZ[$k]:-}" ] || newer "$v" "${OV[$k]}"; } && { OZ[$k]="$z"; OV[$k]="$v"; ON[$k]="$p"; }
+            fi
+        done < <(find "$d" -maxdepth 1 -type f -iname '*.zip' ! -iname 'mpc-pixel-kit*' 2>/dev/null)
+    done
+    [ -n "$SB" ] || [ "${#OZ[@]}" -gt 0 ] || { say "Card: no SampleBoot or OS zips - nothing to set up"; exit 0; }
+    T=$(mktemp -d); trap 'rm -rf "$T"' EXIT   # temporary unpacking folder only
+    unpack() { local n="$T/$RANDOM$RANDOM"; mkdir -p "$n" && unzip -q -o "$1" -d "$n" || return 1   # -> its autorun folder
+               find "$n" -type f -path '*/autorun/autorun.sh' | shortest | xargs -r -d '\n' dirname; }
+    put() { [ -e "$2" ] && return 1; local a; a=$(unpack "$1") && [ -n "$a" ] || { echo "!! Could not unpack $(basename "$1")"; return 1; }
+            mkdir -p "$2" && cp -r "$a/." "$2/"; }   # zip $1 -> new folder $2 (never into an existing one)
+    mkdir -p "$CARD"; AR="$CARD/autorun"; say "Card: $AR"
+    if [ -n "$SB" ]; then
+        if [ ! -e "$AR" ]; then put "$SB" "$AR" && echo "$SBV" > "$AR/sampleboot/.version" && echo "   + SampleBoot $SBV (boot menu)"
+        elif [ -f "$AR/sampleboot/sampleboot-ui" ]; then
+            a=$(unpack "$SB"); cur=$(cat "$AR/sampleboot/.version" 2>/dev/null)
+            if cmp -s "$a/autorun.check" "$AR/autorun.check"; then echo "   SampleBoot $SBV: already on the card"
+            elif [ -n "$cur" ] && ! newer "$SBV" "$cur"; then echo "   SampleBoot $cur on the card is newer than the zip ($SBV) - kept"
+            else   # the program in place: its settings and the OSes in mods/ stay
+                ( cd "$a" && tar -cf - --exclude=./mods --exclude=./sampleboot/sampleboot.conf . ) | ( cd "$AR" && tar -xf - )
+                mkdir -p "$AR/mods" && cp -r "$a/mods/README.txt" "$a/mods/_template" "$AR/mods/" 2>/dev/null
+                [ -f "$AR/sampleboot/sampleboot.conf" ] || cp "$a/sampleboot/sampleboot.conf" "$AR/sampleboot/" 2>/dev/null
+                echo "$SBV" > "$AR/sampleboot/.version"; echo "   ^ SampleBoot updated to $SBV (settings and OSes kept)"
+            fi
+        else echo "   The card's autorun is another OS, not SampleBoot - left as it is (rename it, e.g. autorun-old, for the menu)"; fi
+    fi
+    if [ -f "$AR/sampleboot/sampleboot-ui" ]; then   # SampleBoot: each OS a menu entry
+        mkdir -p "$AR/mods"
+        for k in "${!OZ[@]}"; do
+            z="${OZ[$k]}"; v="${OV[$k]}"; name="${ON[$k]}${v:+ $v}"; same=""; newest=""; older=()
+            for e in "$AR/mods"/*/; do
+                e=$(basename "$e"); case "$e" in _*|.*) continue ;; esac
+                [ "$(lc "$(prod_of "$e")")" = "$k" ] || continue
+                ev=$(ver_of "$e")
+                if [ "$ev" = "$v" ]; then same="$e"; elif newer "$ev" "$v"; then newest="$e"; else older+=("$e"); fi
+            done
+            [ -n "$same" ] && { echo "   $same: already on the card"; continue; }
+            [ -n "$newest" ] && { echo "   $newest on the card is newer than the zip ($v) - kept"; continue; }
+            put "$z" "$AR/mods/$name" || { echo "!! Could not add $name"; continue; }
+            echo "   + $name (menu entry)"
+            for e in "${older[@]}"; do   # hide, don't delete: SampleBoot skips folders starting with "_"
+                h="_$e"; while [ -e "$AR/mods/$h" ]; do h="_$h"; done
+                mv -- "$AR/mods/$e" "$AR/mods/$h" && echo "   - $e hidden from the menu (renamed $h, not deleted)"
+            done
+        done
+    elif [ ! -e "$AR" ] && [ "${#OZ[@]}" -eq 1 ]; then
+        k="${!OZ[*]}"; put "${OZ[$k]}" "$AR" && echo "   + ${ON[$k]} ${OV[$k]} (the card's autorun)"
+    elif [ "${#OZ[@]}" -gt 0 ]; then
+        [ -e "$AR" ] && echo "   The card already has an autorun - OS zips not added (add a SampleBoot zip for a boot menu)" \
+                     || echo "!! Several OS zips but no SampleBoot zip: add SampleBoot (the boot menu) to choose between them"
+    fi
+)
+
+# =============================== bundle: the private FULL zip for another phone ===============================
+# PRIVATE: it contains Akai's firmware and SampQOL. Their licenses allow use on your own devices, not sharing.
+cmd_bundle() (
+    FW="${1:-}"
+    if [ -z "$FW" ]; then
+        mapfile -t C < <(find "$SHARED" -maxdepth 2 -type f \( -iname '*updater*.exe' -o -iname '*updater*.img' \) 2>/dev/null)
+        [ "${#C[@]}" -eq 0 ] && mapfile -t C < <(find "$HERE/bundle" -maxdepth 1 \( -iname '*.exe' -o -iname '*.img' \) 2>/dev/null)
+        [ "${#C[@]}" -gt 1 ] && { echo "!! More than one Akai updater - name it: ./mpc bundle \"<path>\""; printf '   %s\n' "${C[@]}"; exit 1; }
+        FW="${C[0]:-}"
+    fi
+    [ -f "$FW" ] || die "No Akai MPC Sample updater found (needed so the new phone needs no download)"
+    say "Akai updater: $FW"
+    VER=$(ls -t "$SHARED"/mpc-pixel-kit-v*.zip "$SHARED"/*/mpc-pixel-kit-v*.zip 2>/dev/null | grep -vi -- '-full' | head -1 | sed -E 's/.*-(v[0-9][0-9.]*)\.zip$/\1/')
+    OUTZ="$CARD/mpc-pixel-kit-FULL-${VER:-$(date +%Y%m%d)}.zip"
+    S=$(mktemp -d); trap 'rm -rf "$S"' EXIT; K="$S/mpc-pixel-kit"; mkdir -p "$K/bundle"
+    ( cd "$HERE" && tar -cf - --exclude=./work --exclude=./bundle . ) | ( cd "$K" && tar -xf - )
+    ln -s "$(readlink -f "$FW")" "$K/bundle/$(basename "$FW")"   # zip stores the file a link points to
+    [ -d "$CARD/autorun" ] && cp -r "$CARD/autorun" "$K/bundle/autorun" && say "Card autorun: $CARD/autorun"
+    while IFS= read -r z; do   # SampleBoot / OS zips: the new phone sets its card up from them
+        unzip -Z1 "$z" 2>/dev/null | grep -qE '(^|/)autorun/autorun\.sh$' && ln -s "$z" "$K/bundle/$(basename "$z")" && say "Mod zip: $(basename "$z")"
+    done < <(find "$CARD" -maxdepth 1 -type f -iname '*.zip' ! -iname 'mpc-pixel-kit*' 2>/dev/null)
+    rm -f "$OUTZ"; say "Writing $OUTZ (a minute or two: the updater is large)"
+    ( cd "$S" && zip -r -q -1 "$OUTZ" mpc-pixel-kit ) || die "Could not write the zip (space on the phone?)"
+    echo; echo "Done: $OUTZ ($(du -h "$OUTZ" | cut -f1)). On the new phone put it in Download/MPC-Sample and run:"
+    echo "  $INSTALL_CMD"
+    echo "PRIVATE: contains Akai's firmware and SampQOL - for your own phones only, don't share or upload it."
+)
+
+# =============================== reset: MPC settings to factory ===============================
+cmd_reset() {
+    [ -d "$ROOT" ] || die "No extracted firmware"
+    stop_run
+    local B; B=~/mpc-reset-backup-$(date +%Y%m%d-%H%M%S); local n=0 p
+    while IFS= read -r p; do
+        [ -e "$p" ] || continue; local rel="${p#"$ROOT"/}"
+        sudo mkdir -p "$B/$(dirname "$rel")" && sudo mv "$p" "$B/$rel" && { echo "   moved $rel"; n=$((n + 1)); }
+    done < <(printf '%s\n' "$ROOT/data/Settings" "$ROOT/media/az01-internal/Settings" "$ROOT/data/Autosave" "$ROOT/media/az01-internal/Autosave"
+             sudo find "$ROOT/data" "$ROOT/media/az01-internal" -maxdepth 4 -iname '*autosave*' 2>/dev/null)
+    sudo chown -R "$(id -u):$(id -g)" "$B" 2>/dev/null
+    [ "$n" = 0 ] && say "Settings already at factory defaults" || say "Done: $n item(s) moved to $B (move them back to undo)"
+}
+
+cmd_fix_sudo() {
+    sudo true 2>/dev/null || { echo "sudo can't run: ./mpc autostart off, fully close the Terminal app and reopen it, then ./mpc fix-sudo"; return 1; }
+    nopty; say "sudo no longer needs a terminal device"
+}
+
+# =============================== autostart ===============================
+cmd_autostart() {
+    local RC="$HOME/.bashrc" B='# >>> mpc-autostart >>>' E='# <<< mpc-autostart <<<'
+    case "${1:-}" in
+      on)  sudo -n true 2>/dev/null && nopty
+           [ -f "$RC" ] && sed -i "/^$B\$/,/^$E\$/d" "$RC"
+           printf '%s\n' "$B" "if [ -t 0 ] && ! \"$HERE/mpc\" running; then" \
+               "    ( cd \"$HERE\" && setsid nohup ./mpc run > /tmp/mpc-run.log 2>&1 < /dev/null & )" \
+               "    echo \"MPC starting in the background (log: /tmp/mpc-run.log; stop: $HERE/mpc stop)\"" "fi" "$E" >> "$RC"
+           echo "Autostart on: the MPC starts whenever the Terminal opens." ;;
+      off) [ -f "$RC" ] && sed -i "/^$B\$/,/^$E\$/d" "$RC"; echo "Autostart off." ;;
+      *)   grep -q "^$B\$" "$RC" 2>/dev/null && echo "Autostart is on." || echo "Autostart is off (./mpc autostart on)." ;;
+    esac
+}
+
+# =============================== update / install ===============================
+cmd_update() {
+    if [ "$0" != /tmp/mpc-update ]; then   # the update replaces this file: run from a copy
+        cp "$HERE/mpc" /tmp/mpc-update && MPC_HOME="$HERE" exec bash /tmp/mpc-update update "$@"
+    fi
+    stop_run
+    local Z; Z=$(ls -t "$SHARED"/mpc-pixel-kit*.zip "$SHARED"/*/mpc-pixel-kit*.zip 2>/dev/null | grep -vi -- '-full' | head -1)
+    [ -n "$Z" ] || Z=$(ls -t "$SHARED"/mpc-pixel-kit*.zip "$SHARED"/*/mpc-pixel-kit*.zip 2>/dev/null | head -1)   # FULL only if alone
+    [ -n "$Z" ] || die "No mpc-pixel-kit zip in the phone's Download folder"
+    say "Using: $Z"
+    cd ~ && unzip -oq "$Z" && cd "$HERE" || die "Could not unpack $Z"
+    ./mpc setup | grep -E '^(==|!!)'; ./mpc autostart on && exec ./mpc run "$@"
+}
+
+cmd_install() {
+    local FW="${1:-}" FAIL=0 MIN_MB=4000
+    ok()  { printf '  [OK] %s\n' "$1"; }
+    bad() { printf '  [--] %s\n' "$1"; [ -n "${2:-}" ] && printf '       Fix: %s\n' "$2"; FAIL=$((FAIL + 1)); }
+    echo "== Pre-flight check"
+    [ "$(uname -m)" = aarch64 ] && ok "CPU is ARM64" || bad "CPU is $(uname -m), not ARM64" "use the Pixel's Linux Terminal"
+    local f MISS=""; for f in mpc.py addon.c helpers.c; do [ -f "$f" ] || MISS="$MISS $f"; done
+    [ -z "$MISS" ] && ok "Kit files complete" || bad "Kit incomplete (missing:$MISS)" "unzip the kit zip again"
+    ls "$SHARED" >/dev/null 2>&1 && ok "Download folder reachable ($SHARED)" || bad "Can't reach $SHARED" "reopen the Terminal, or MPC_SHARED=<folder>"
+    { sudo -n true 2>/dev/null || sudo true 2>/dev/null; } && ok "sudo works" || bad "sudo isn't working" "close and reopen the Terminal, then ./mpc fix-sudo"
+    if [ -f "$WORK/.extracted" ]; then ok "Firmware already extracted (reused)"
+    else
+        local FREE; FREE=$(df -Pm "$HOME" 2>/dev/null | awk 'NR==2{print $4}')
+        [ "${FREE:-0}" -ge "$MIN_MB" ] && ok "Free space: $FREE MB" || bad "Free space: only ${FREE:-0} MB (need ~$MIN_MB)" "Terminal settings > Disk resize: 8 GB or more"
+        [ -n "$FW" ] || FW=$(find "$HERE/bundle" -maxdepth 1 \( -iname '*.exe' -o -iname '*.img' \) 2>/dev/null | head -1)   # a FULL zip
+        if [ -z "$FW" ]; then
+            local C; mapfile -t C < <(updaters)
+            if [ "${#C[@]}" -eq 1 ]; then FW="${C[0]}"
+            elif [ "${#C[@]}" -gt 1 ]; then bad "More than one possible updater" "name it: ./mpc install \"<path>\""; printf '         %s\n' "${C[@]}"
+            else bad "No Akai MPC Sample updater in $SHARED" "download the official 1.3.0 updater from akaipro.com into Download"; fi
+        fi
+        [ -z "$FW" ] || { [ -f "$FW" ] && ok "Akai updater: $FW" || bad "Updater not found: $FW"; }
+    fi
+    [ "$FAIL" = 0 ] || { echo "Pre-flight found $FAIL problem(s) ([--] above). Fix them and run ./mpc install again. Nothing was installed."; exit 2; }
+    say "[1/5] Tools";              cmd_setup || die "Setup failed (see above)"
+    if [ -f "$WORK/.extracted" ]; then say "[2/5] Firmware already extracted"
+    else say "[2/5] Firmware from $FW"; cmd_extract "$FW" || die "Firmware extract failed (see above)"; fi
+    say "[3/5] Factory content";    cmd_content || true
+    say "[4/5] The card";
+    if [ -d "$HERE/bundle/autorun" ]; then   # a FULL zip: your card's autorun (SampleBoot and its OSes)
+        mkdir -p "$CARD"; [ -e "$CARD/autorun" ] && echo "   The card already has an autorun folder - left as it is" \
+            || { cp -r "$HERE/bundle/autorun" "$CARD/autorun" && echo "   + autorun from the FULL zip"; }
+    fi
+    cmd_card || true
+    cmd_autostart on
+    say "[5/5] Starting the MPC - Ctrl+C stops it; it starts by itself whenever the Terminal opens"
+    exec "$HERE/mpc" run
+}
+
+# =============================== run ===============================
+cmd_run() {
+    local SECS="${1:-0}"; case "$SECS" in *[!0-9]*) SECS=0;; esac
+    [ -f "$WORK/.extracted" ] || die "No firmware yet: ./mpc install"
+    [ "$(uname -m)" = aarch64 ] || die "This needs ARM64 Linux."
+    sudo true 2>/dev/null || die "sudo can't run: ./mpc autostart off, fully close and reopen the Terminal, then ./mpc fix-sudo"
+    nopty
+    command -v gcc >/dev/null && command -v bindfs >/dev/null && command -v inotifywait >/dev/null || cmd_setup || exit 1
+    # another run (e.g. autostart's): stop it and let its cleanup finish (two MPCs fight over display and sound)
+    stop_run; pkill -f "[i]notifywait.*az01-internal-sd" 2>/dev/null; sleep 1
+    echo $$ > "$PIDF"; rm -rf "$OUT"; mkdir -p "$OUT"
+    APID=""; PIDS=(); LIVEPIDS=""; BOOT=""; RELAY=""; EXTOK=""; EXT="$CARD"
+
+    # ---- the card: unmapping, and moving what the MPC wrote outside your folders to them ----
+    unmount_sd() {   # every mount at or under $SD ("kids": only under), children first (\040 = a space)
+        local m; while IFS= read -r m; do m=$(printf '%b' "$m"); fusermount3 -u "$m" 2>/dev/null || sudo umount -l "$m" 2>/dev/null
+        done < <(awk -v d="$SD" -v k="${1:-}" '($5==d && k=="") || index($5,d"/")==1 {print $5}' /proc/self/mountinfo 2>/dev/null | sort -r)
+    }
+    rescue_sd() {   # COPY ONLY, never deletes: what sits on the card's own storage (not your mapped folders) -> your folder
+        [ "$EXT" != 0 ] && [ -d "$EXT" ] || return 0
+        local sddev name; sddev=$(sudo stat -c %d "$SD" 2>/dev/null) || return 0
+        while IFS= read -r name; do
+            [ -n "$name" ] || continue
+            if sudo mountpoint -q "$SD/$name" 2>/dev/null || [ "$(sudo stat -c %d "$SD/$name" 2>/dev/null)" != "$sddev" ]; then
+                echo "!! '$name' is still mapped to your phone folder - left alone"; continue; fi
+            sudo test -d "$SD/$name" && [ -z "$(sudo ls -A "$SD/$name" 2>/dev/null)" ] && continue
+            say "Copying '$name' (written to the card outside your folders) to $EXT"
+            sudo tar -C "$SD" -cf - -- "$name" | tar -C "$EXT" -xf - --skip-old-files --no-same-owner 2>/dev/null
+        done < <(sudo ls -A "$SD" 2>/dev/null)
+    }
+    release_card() { unmount_sd kids; rescue_sd; sudo umount -l "$WORK/cardbase" 2>/dev/null; unmount_sd; rescue_sd; }
+    cleanup() {
+        if [ -n "$BOOT" ]; then   # undo the boot changes to the rootfs
+            sudo pkill -INT -f "$APP_RE" 2>/dev/null; sudo pkill -f "[s]ampleboot" 2>/dev/null; sudo rm -f "$ROOT/run/ac50.stopped"
+            if [ -n "$RELAY" ]; then
+                sudo pkill -TERM -f "[m]pc-devrelay" 2>/dev/null; sleep 0.3
+                [ "$(readlink "$ROOT/dev/fb0" 2>/dev/null)" = /run/mpc-fb0 ] && sudo rm -f "$ROOT/dev/fb0"
+                awk -v d="$ROOT/dev/fb0" '$5==d{f=1} END{exit !f}' /proc/self/mountinfo && sudo umount -l "$ROOT/dev/fb0"
+                case "$(readlink "$ROOT/dev/snd/midiC8D0" 2>/dev/null)" in /dev/pts/*|/run/mpc-midi8) sudo rm -f "$ROOT/dev/snd/midiC8D0" ;; esac
+            fi
+            sudo rm -f "$ROOT/etc/ld.so.preload"
+            for S in /usr/bin/systemctl /bin/systemctl; do [ -e "$ROOT$S.mpcreal" ] && sudo mv -f "$ROOT$S.mpcreal" "$ROOT$S"; done
+        fi
+        [ -n "$APID" ] && { sudo kill -INT "$APID" 2>/dev/null; sleep 1; sudo kill -KILL "$APID" 2>/dev/null; }
+        for p in $LIVEPIDS; do kill "$p" 2>/dev/null; done; pkill -f "[i]notifywait.*az01-internal-sd" 2>/dev/null
+        for p in "${PIDS[@]}"; do sudo kill "$p" 2>/dev/null; done
+        sudo pkill -f "[m]pc.py (ctl|disks)"; sudo pkill -f "[a]udiobridge "
+        for m in run dev sys proc; do mountpoint -q "$ROOT/$m" && sudo umount -R -l "$ROOT/$m"; done
+        release_card
+        sudo cp "$ROOT/tmp/fbshim.log" "$OUT/" 2>/dev/null; sudo chown -R "$(id -u):$(id -g)" "$OUT" 2>/dev/null
+        [ "$(cat "$PIDF" 2>/dev/null)" = "$$" ] && rm -f "$PIDF"
+    }
+    trap cleanup EXIT; trap 'exit 130' INT TERM HUP   # Ctrl+C, ./mpc stop, closing the Terminal: clean shutdown
+
+    # ---- chroot mounts (rslave: cleanup never touches this system's own mounts), and the MPC Sample identity ----
+    sudo mkdir -p "$ROOT"/{proc,sys,dev,run,tmp}
+    sudo mount -t proc proc "$ROOT/proc"
+    sudo mount --rbind /sys "$ROOT/sys"; sudo mount --make-rslave "$ROOT/sys"
+    sudo mount --rbind /dev "$ROOT/dev"; sudo mount --make-rslave "$ROOT/dev"
+    sudo mount -t tmpfs tmpfs "$ROOT/run"
+    sudo mkdir -p "$ROOT/run/udev" "$ROOT/run/dbus"; [ -d /run/udev ] && sudo mount --bind /run/udev "$ROOT/run/udev"
+    local DT="$ROOT/sys/firmware/devicetree/base"   # the program checks it runs on an MPC Sample (ACVS, board AZ07)
+    if sudo mount -t tmpfs -o mode=755 tmpfs "$ROOT/sys/firmware" 2>/dev/null; then
+        sudo mkdir -p "$DT/chosen"
+        sudo sh -c "printf 'Akai Professional MPC Sample\0' > '$DT/model'; printf 'inmusic,az07\0inmusic,az0x\0' > '$DT/compatible'
+                    printf 'ACVS\0' > '$DT/inmusic,product-code'; printf '\0\0\0\1' > '$DT/inmusic,az07-pcb-rev'
+                    printf 'KIT0000000001\0' > '$DT/serial-number'; printf 'U-Boot 2017.09\0' > '$DT/chosen/u-boot,version'"
+    else echo "!! Could not set the MPC Sample identity (no /sys/firmware)"; fi
+
+    # ---- the microSD card = your phone folder ----
+    # Like an inserted card, the card root is its OWN filesystem (else the Save page says "No SD card"): a tmpfs named
+    # /dev/mmcblk1p1 as on the hardware (mods look for it in /proc/mounts), sized to your folder's free space. It holds
+    # no data: each of your folder's subfolders is mapped onto it, flat; loose files (zips, the .exe) are left out.
+    release_card
+    if [ "$EXT" != 0 ]; then
+        mkdir -p "$EXT/MPC-Sample" 2>/dev/null   # the MPC's own content store: always mapped, so it saves to your folder
+        bind_at() {   # $1 onto $2: --bind when root can read it, else bindfs (FUSE sources like /mnt/shared)
+            sudo mkdir -p "$2"
+            if sudo ls "$1" >/dev/null 2>&1; then sudo mount --bind "$1" "$2"
+            else sudo chown "$(id -u):$(id -g)" "$2"; bindfs -o allow_other "$1" "$2" 2>>"$OUT/bindfs.log"; fi
+        }
+        sudo mkdir -p "$SD"
+        local FREEK; FREEK=$(df -Pk "$EXT" 2>/dev/null | awk 'NR==2{print $4}')
+        case "$FREEK" in ''|*[!0-9]*) FREEK=0 ;; esac; [ "$FREEK" -ge 1048576 ] || FREEK=1048576
+        sudo mount -t tmpfs -o "size=${FREEK}k,mode=0755" /dev/mmcblk1p1 "$SD" || echo "!! The card got no filesystem of its own: Save may say 'No SD card'"
+        # the card's own storage WITHOUT your folders on top, to sweep up what the MPC wrote into a brand-new folder
+        # in the instant before it was mapped (private, so later mappings don't appear in it)
+        BASE="$WORK/cardbase"; mkdir -p "$BASE"
+        sudo mount --make-private "$SD" 2>/dev/null; sudo mount --bind "$SD" "$BASE" && sudo mount --make-private "$BASE" 2>/dev/null
+        local name
+        while IFS= read -r name; do [ -n "$name" ] && [ -d "$EXT/$name" ] && bind_at "$EXT/$name" "$SD/$name" && EXTOK=1
+        done < <(cd "$EXT" 2>/dev/null && ls -A)
+        # LIVE both ways, as on a real card (one copy), COPY ONLY:
+        #  card -> phone: a folder the MPC creates at the card root joins your folder at once (mapped before its files
+        #                 are written); a file it saves at the root is copied when closed
+        #  phone -> card: a folder you add to (remove from) your folder is on (off) the card within ~2 s
+        map_one() {
+            sudo mountpoint -q "$SD/$1" 2>/dev/null && return 0
+            if sudo test -d "$SD/$1"; then
+                mkdir -p "$EXT/$1" 2>/dev/null || return 1
+                [ -n "$(sudo ls -A "$SD/$1" 2>/dev/null)" ] && sudo tar -C "$SD/$1" -cf - . | tar -C "$EXT/$1" -xf - --skip-old-files --no-same-owner 2>/dev/null
+            elif [ ! -d "$EXT/$1" ]; then return 0; fi
+            bind_at "$EXT/$1" "$SD/$1"
+        }
+        sweep_one() {   # files under a mapped folder written before it was mapped -> your folder, if it lacks them
+            local f; while IFS= read -r f; do
+                [ -e "$EXT/$f" ] || { mkdir -p "$EXT/$(dirname -- "$f")" && sudo cat -- "$BASE/$f" > "$EXT/$f.mpc-part" && mv -f -- "$EXT/$f.mpc-part" "$EXT/$f"; }
+            done < <(sudo sh -c 'cd "$1" && find "$2" -type f ! -newermt "1 second ago"' _ "$BASE" "$1")
+        }
+        if [ -n "$EXTOK" ]; then
+            local LOCK="$OUT/card.lock"
+            ( inotifywait -m -q -e create -e moved_to -e close_write --format '%e|%f' "$SD" 2>/dev/null |
+              while IFS='|' read -r ev name; do
+                  [ -n "$name" ] || continue
+                  case "$ev" in
+                    *ISDIR*) case "$ev" in CREATE*|MOVED_TO*) ( flock 9; map_one "$name" ) 9>"$LOCK" ;; esac ;;
+                    CLOSE_WRITE*|MOVED_TO*) sudo test -f "$SD/$name" && ! sudo mountpoint -q "$SD/$name" 2>/dev/null && \
+                        sudo cat -- "$SD/$name" > "$EXT/.$name.mpc-part" && mv -f -- "$EXT/.$name.mpc-part" "$EXT/$name" ;;
+                  esac
+              done ) &
+            LIVEPIDS="$!"
+            ( while sleep 2; do
+                L=$(cd "$EXT" 2>/dev/null && ls -A) || continue
+                while IFS= read -r name; do
+                    [ -n "$name" ] && [ -d "$EXT/$name" ] || continue
+                    sudo mountpoint -q "$SD/$name" 2>/dev/null || ( flock 9; map_one "$name" ) 9>"$LOCK"
+                    [ -n "$(sudo ls -A "$BASE/$name" 2>/dev/null)" ] && ( flock 9; sweep_one "$name" ) 9>"$LOCK"
+                done <<< "$L"
+                while IFS= read -r name; do   # gone from your folder -> off the card (only the mapping is removed)
+                    [ -n "$name" ] && sudo mountpoint -q "$SD/$name" 2>/dev/null && ! grep -qxF -- "$name" <<< "$L" || continue
+                    ( flock 9; fusermount3 -u "$SD/$name" 2>/dev/null || sudo umount -l "$SD/$name" 2>/dev/null
+                      sudo mountpoint -q "$SD/$name" 2>/dev/null || [ "$(sudo stat -c %d "$SD/$name" 2>/dev/null)" != "$(sudo stat -c %d "$SD")" ] \
+                          || sudo rmdir -- "$SD/$name" 2>/dev/null ) 9>"$LOCK"   # an empty leftover on the card's own storage only
+                done < <(sudo ls -A "$SD" 2>/dev/null)
+              done ) &
+            LIVEPIDS="$LIVEPIDS $!"
+            say "microSD card: $EXT (folders flat at the card root, live both ways)"
+        else echo "!! Could not use $EXT as the microSD card (work/run/bindfs.log)"; fi
+    fi
+
+    # ---- factory defaults at every start: no user template for new projects, FADER = pad volume ----
+    local KEEP=() TB; TB=~/mpc-template-backup/$(date +%Y%m%d-%H%M%S)
+    [ "${MPC_KEEP_TEMPLATE:-0}" = 1 ] && KEEP+=(keep-template); [ "${MPC_KEEP_FADER:-0}" = 1 ] && KEEP+=(keep-fader)
+    sudo python3 "$HERE/mpc.py" defaults "$ROOT" "$TB" "${KEEP[@]}"; [ -d "$TB" ] && sudo chown -R "$(id -u):$(id -g)" "$TB"
+
+    pgrep -x weston >/dev/null && { sudo pkill -x weston; sleep 2; }   # this system's display server lets the display go
+
+    # ---- D-Bus system bus in the chroot, with the disk service stand-in (reports the card) ----
+    if [ -x "$ROOT/usr/bin/dbus-daemon" ]; then
+        sudo chroot "$ROOT" /usr/bin/dbus-daemon --system --fork --print-pid > "$OUT/dbus.pid" 2> "$OUT/dbus.log"
+        PIDS+=("$(head -1 "$OUT/dbus.pid" 2>/dev/null)")
+        [ -n "$EXTOK" ] && [ -S "$ROOT/run/dbus/system_bus_socket" ] && \
+            sudo python3 "$HERE/mpc.py" disks "$ROOT/run/dbus/system_bus_socket" /media/az01-internal-sd "$OUT/edisks.log" 2>>"$OUT/edisks.log" &
+    elif [ -S /run/dbus/system_bus_socket ]; then
+        sudo touch "$ROOT/run/dbus/system_bus_socket" && sudo mount --bind /run/dbus/system_bus_socket "$ROOT/run/dbus/system_bus_socket"
+    fi
+
+    # ---- the add-on and the helpers: built when their source changed ----
+    local SUM; SUM=$(cat "$HERE/addon.c" "$HERE/helpers.c" | sha256sum)
+    if [ "$SUM" != "$(cat "$WORK/build.sum" 2>/dev/null)" ] || [ ! -f "$WORK/addon.so" ]; then
+        gcc -O2 -shared -fPIC -fno-stack-protector -o "$WORK/addon.so" "$HERE/addon.c" || die "The add-on did not compile"
+        gcc -O2 -DAUDIOBRIDGE -o "$WORK/audiobridge" "$HERE/helpers.c" -lasound -lpthread || die "audiobridge did not compile (AUDIO_BRIDGE=0 ./mpc run plays without it)"
+        gcc -O2 -DDEVRELAY -o "$WORK/devrelay" "$HERE/helpers.c" -ldl || die "devrelay did not compile"
+        echo "$SUM" > "$WORK/build.sum"; say "Add-on built"
+    fi
+    sudo install -m 644 "$WORK/addon.so" "$ROOT/tmp/fbshim.so"; sudo rm -f "$ROOT/tmp/fb0.raw" "$ROOT/tmp/fbshim.log"
+
+    # ---- sound: the phone's card plays OR records, and the program always opens both. So its sound goes through two
+    # pipes served by audiobridge, which plays it and switches the card to the mic while SAMPLE RECORD is lit ----
+    local ACONF="$ROOT/etc/asound.conf" PLAY REC
+    [ -f "$ACONF.kit-orig" ] || { [ -f "$ACONF" ] && sudo cp "$ACONF" "$ACONF.kit-orig" || sudo touch "$ACONF.kit-orig"; }
+    if [ "${AUDIO_BRIDGE:-1}" != 0 ]; then
+        sudo rm -f "$ROOT/tmp/mpc-mic.fmt" "$ROOT/tmp/mpc-mic.on"
+        sudo MIC_GAIN="${MIC_GAIN:-1}" "$WORK/audiobridge" "$ROOT" "${AUDIO_PERIOD:-512}" 2> "$OUT/audiobridge.log" &
+        for _ in $(seq 20); do [ -p "$ROOT/tmp/mpc-mic.fifo" ] && break; sleep 0.1; done
+        PLAY='{ type plug slave { pcm { type file slave.pcm "null" file "/tmp/mpc-play.fifo" format "raw" } format S32_LE channels 6 rate 44100 } }'
+        # input: the "file" plugin straight at the program's end (layers below it read ahead and drop sound)
+        REC='{ type file slave.pcm { type null } file "/dev/null" infile "/tmp/mpc-mic.fifo" format "raw" }'
+        say "Sound through audiobridge; the mic records while SAMPLE RECORD is lit (sound off meanwhile)"
+    else PLAY='{ type hw card $CARD device $DEV subdevice $SUBDEV }'; REC='{ type null }'; fi
+    printf '\n# added by mpc-pixel-kit: the program'"'"'s hw:N\npcm.!hw {\n    @args [ CARD DEV SUBDEV ]\n    @args.CARD { type string default "0" }\n    @args.DEV { type integer default 0 }\n    @args.SUBDEV { type integer default -1 }\n    type asym\n    playback.pcm %s\n    capture.pcm %s\n}\n' "$PLAY" "$REC" \
+        | sudo sh -c "cat '$ACONF.kit-orig' - > '$ACONF'"
+
+    # ---- the control chip's other end ----
+    sudo rm -f "$ROOT"/tmp/mpcctl-*.sock "$ROOT/tmp/mpcseq.sock"
+    sudo MPC_LOG="${MPC_LOG:-0}" python3 "$HERE/mpc.py" ctl "$ROOT" "$OUT" > "$OUT/mpcctl.out" 2>&1 &
+    sleep 0.5
+    local ENVV=(MALLOC_ARENA_MAX=1 "MPC_AUDIO_PERIOD=${AUDIO_PERIOD:-512}" "MPC_PANEL=${PANEL:-1}" "MPC_AUDIO16=${AUDIO16:-1}" "MPC_LOG=${MPC_LOG:-0}")
+    local CENV=(/usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/root "${ENVV[@]}")
+    local t=0
+
+    if [ "${MPC_BOOT:-auto}" = off ]; then   # ---- the stock app directly ----
+        sudo chroot "$ROOT" /bin/sh -c 'ulimit -S -s 1024; exec "$@"' sh "${CENV[@]}" LD_PRELOAD=/tmp/fbshim.so \
+            setarch -R -- "/usr/bin/MPC Sample" > "$OUT/app.log" 2>&1 &
+        for _ in $(seq 20); do sleep 0.5; APID=$(pgrep -f "$APP_RE" | head -1); [ -n "$APID" ] && break; done
+        [ -n "$APID" ] || { echo "!! The MPC program did not start:"; tail -20 "$OUT/app.log"; exit 1; }
+        say "MPC running. Stop: Ctrl+C"
+        while sudo kill -0 "$APID" 2>/dev/null; do sleep 2; t=$((t + 2)); [ "$SECS" -gt 0 ] && [ "$t" -ge "$SECS" ] && break; done
+        sudo kill -0 "$APID" 2>/dev/null || { echo "!! The MPC program stopped after about ${t} s:"; tail -8 "$OUT/app.log"; sudo grep -A6 CRASH "$ROOT/tmp/fbshim.log" 2>/dev/null; }
+        exit 0
+    fi
+
+    # ---- boot like the hardware (default): the card's autorun, then the app ----
+    # The firmware's az01-script-runner only sees a real inserted card, so the kit runs <card>/autorun/autorun.sh
+    # itself, as the firmware would. The add-on is in /etc/ld.so.preload, so the autorun, any mod and the app all
+    # get the fake hardware. A systemctl shim makes ac50.service the app with a real stop flag, so a boot selector
+    # (SampleBoot: stop ac50, show its menu, start the pick) works, and a plain mod still gets the app started.
+    BOOT=1
+    sudo rm -f "$ROOT/run/ac50.stopped" "$ROOT/run/ac50.starting"
+    echo /tmp/fbshim.so | sudo tee "$ROOT/etc/ld.so.preload" >/dev/null
+    sudo tee "$ROOT/tmp/mpc-systemctl" >/dev/null <<'SH'
+#!/bin/sh
+# systemctl stand-in: ac50.service is the MPC app (/run/ac50.stopped makes a stop stick until a start)
+app() { for p in /proc/[0-9]*; do [ "$(tr -d '\000' <"$p/comm" 2>/dev/null)" = "MPC Sample" ] && { echo "${p#/proc/}"; return 0; }; done; return 1; }
+launch() {   # unless it runs or a start is under way (the app takes a few seconds)
+    app >/dev/null && return 0
+    s=$(cat /run/ac50.starting 2>/dev/null); [ -n "$s" ] && [ $(( $(date +%s) - s )) -lt 30 ] && return 0
+    date +%s > /run/ac50.starting; setsid /usr/bin/launch-ac50 >/tmp/ac50.log 2>&1 &
+}
+kill_app() { p=$(app) && { kill -INT "$p" 2>/dev/null; sleep 1; kill -KILL "$p" 2>/dev/null; }; }
+c=$1; shift; svc=; for a in "$@"; do case "$a" in ac50.service|ac50) svc=ac50;; esac; done
+case "$c" in
+  start)   [ "$svc" = ac50 ] && { rm -f /run/ac50.stopped; launch; } ;;
+  stop)    [ "$svc" = ac50 ] && { : > /run/ac50.stopped; kill_app; } ;;
+  restart) [ "$svc" = ac50 ] && { rm -f /run/ac50.stopped; kill_app; launch; } ;;
+  is-active) [ "$svc" = ac50 ] && app >/dev/null && { echo active; exit 0; }; echo inactive; exit 3 ;;
+  is-system-running) echo running; exit 0 ;;
+  is-enabled) exit 1 ;;
+esac
+exit 0
+SH
+    printf '#!/bin/sh\nA=/media/az01-internal-sd/autorun\n[ -f "$A/autorun.sh" ] || { echo "no autorun.sh on the card"; exit 0; }\necho "running $A/autorun.sh"\ncd "$A" && /bin/sh "$A/autorun.sh"; echo "autorun.sh returned ($?)"\n' \
+        | sudo tee "$ROOT/tmp/mpc-autorun" >/dev/null
+    sudo chmod 755 "$ROOT/tmp/mpc-systemctl" "$ROOT/tmp/mpc-autorun"
+    for S in /usr/bin/systemctl /bin/systemctl; do
+        [ -e "$ROOT$S" ] && { [ -e "$ROOT$S.mpcreal" ] || sudo cp -a "$ROOT$S" "$ROOT$S.mpcreal"; }
+        sudo ln -sf /tmp/mpc-systemctl "$ROOT$S" 2>/dev/null
+    done
+    say "Booting like the hardware: the card's autorun, then the app"
+    # devices for STATIC programs (SampleBoot's menu, many mod UIs), which the add-on can't reach: /dev/fb0 = a frame
+    # file shown on the display, card 8 "Surface" in /proc/asound/cards, /dev/snd/midiC8D0 = the surface's MIDI
+    sudo install -m 755 "$WORK/devrelay" "$ROOT/tmp/mpc-devrelay"
+    sudo sh -c "head -c 307200 /dev/zero > '$ROOT/run/mpc-fb0'"
+    if [ -e "$ROOT/dev/fb0" ] && [ ! -L "$ROOT/dev/fb0" ]; then sudo mount --bind "$ROOT/run/mpc-fb0" "$ROOT/dev/fb0"
+    else sudo ln -sfn /run/mpc-fb0 "$ROOT/dev/fb0"; fi
+    sudo mkdir -p "$ROOT/dev/snd" "$ROOT/dev/pts"
+    # the relay's MIDI port is a pseudo-terminal: give the chroot a private devpts (else the relay uses a named pipe)
+    awk -v d="$ROOT/dev/pts" '$5==d && / - devpts /{f=1} END{exit !f}' /proc/self/mountinfo || \
+        sudo mount -t devpts -o newinstance,ptmxmode=0666,mode=0620 devpts "$ROOT/dev/pts" 2>/dev/null
+    if [ -f "$ROOT/proc/asound/cards" ]; then
+        { cat "$ROOT/proc/asound/cards"; printf ' 8 [Surface        ]: AC50 - Control Surface\n                      MPC Sample Control Surface\n'; } \
+            | sudo tee "$ROOT/run/mpc-asound-cards" >/dev/null
+        sudo mount --bind "$ROOT/run/mpc-asound-cards" "$ROOT/proc/asound/cards"
+    fi
+    pgrep -x weston >/dev/null && { sudo pkill -x weston; sleep 1; }   # it may have restarted
+    sudo chroot "$ROOT" "${CENV[@]}" /tmp/mpc-devrelay > "$OUT/devrelay.log" 2>&1 &
+    PIDS+=($!); RELAY=1; sleep 1
+    # the autorun (a boot selector like SampleBoot backgrounds its UI and stops ac50 through the shim)
+    sudo chroot "$ROOT" "${CENV[@]}" /tmp/mpc-autorun > "$OUT/script-runner.log" 2>&1
+    # ac50.service, like systemd on the hardware: kept running unless a mod stopped it. With an autorun on the card,
+    # it gets MPC_BOOT_GRACE seconds to take over first, so nothing starts behind a boot menu.
+    local WAIT=0; sudo test -f "$SD/autorun/autorun.sh" && WAIT="${MPC_BOOT_GRACE:-15}"
+    ( sleep "$WAIT"
+      while :; do
+          st=$(sudo cat "$ROOT/run/ac50.starting" 2>/dev/null)
+          if [ ! -e "$ROOT/run/ac50.stopped" ] && ! pgrep -f "$APP_RE" >/dev/null && { [ -z "$st" ] || [ $(( $(date +%s) - st )) -ge 30 ]; }; then
+              date +%s | sudo tee "$ROOT/run/ac50.starting" >/dev/null
+              sudo chroot "$ROOT" /bin/sh -c 'ulimit -S -s 1024; exec "$@"' sh "${CENV[@]}" /usr/bin/launch-ac50 >> "$OUT/app.log" 2>&1
+          fi
+          sleep 2
+      done ) &
+    PIDS+=($!)
+    say "Booting (Ctrl+C to stop). Logs: work/run/script-runner.log, work/run/app.log, card autorun/sampleboot/last-boot.log"
+    local shown=0
+    while :; do
+        sleep 2; t=$((t + 2))
+        [ "$shown" = 0 ] && pgrep -f "$APP_RE" >/dev/null && { shown=1; say "MPC running. Stop: Ctrl+C"; }
+        [ "$SECS" -gt 0 ] && [ "$t" -ge "$SECS" ] && break
+    done
+    exit 0
+}
+
+# =============================== dispatch ===============================
+c="${1:-}"; shift 2>/dev/null
+case "$c" in
+  install|run|update|setup|extract|content|card|bundle|reset|autostart) "cmd_$c" "$@" ;;
+  fix-sudo) cmd_fix_sudo ;;
+  stop)     stop_run; echo "MPC stopped." ;;
+  running)  running ;;   # for the autostart line in ~/.bashrc
+  *)        sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; [ -z "$c" ] || exit 2 ;;
+esac

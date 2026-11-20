@@ -1,0 +1,7 @@
+# Created on the phone - never commit: Akai's firmware and your private bundle
+work/
+bundle/
+*.zip
+*.exe
+*.img
+__pycache__/
