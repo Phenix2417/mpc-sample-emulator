@@ -47,11 +47,14 @@ Use it to play the MPC Sample on your phone, or to test mods and custom OSes bef
 
 | | |
 |---|---|
-| **Phone** | A Google Pixel whose Developer options include **Linux development environment** (the Android Linux Terminal). Developed on a Pixel 10a. |
+| **Phone** | A phone whose Developer options include **Linux development environment** (the Android Linux Terminal). Developed and tested on a Pixel 10a. |
 | **Storage** | 8 GB or more for the Linux Terminal's disk. The firmware unpacks to about 3 GB. |
 | **Internet** | Needed once, during installation, to install Linux tools. |
 | **Firmware** | Akai's official **MPC Sample 1.3.0 updater** (`MPC Sample 1.3.0 Updater.exe`, about 168 MB), from [akaipro.com](https://www.akaipro.com). |
 | **Optional** | Mod zips to test, such as **SampleBoot** (a boot menu) and **SampQOL** (an alternative OS). Download them from their authors' official pages. |
+
+> **Note:** other Android phones that run the Linux Terminal app (ARM64) should be able to run the emulator too, but
+> they haven't been tested yet. If you try one, please open an issue and say how it went.
 
 ---
 
