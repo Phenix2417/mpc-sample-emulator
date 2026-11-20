@@ -161,7 +161,7 @@ static int open_midi(int card, int flags) {
 }
 
 /* ---- fake ALSA sequencer (/dev/snd/seq) ----
- * JUCE reads MIDI devices through the ALSA sequencer, which the Pixel's Linux kernel does not have.
+ * JUCE reads MIDI devices through the ALSA sequencer, which the Pixel/Android Linux Terminal's kernel does not have.
  * Each open of /dev/snd/seq becomes a SOCK_SEQPACKET connection to mpc.py ctl (/tmp/mpcseq.sock).
  * Records on that socket are [card, MIDI bytes...]. Clients, ports and subscriptions are kept here;
  * read()/write() convert between sequencer events and MIDI bytes. Fake cards 8 and 9 appear as

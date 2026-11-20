@@ -1,6 +1,6 @@
-# MPC Sample Emulator for Pixel
+# MPC Sample Emulator for Pixel/Android
 
-This kit runs Akai's official **MPC Sample 1.3.0** firmware, unmodified, in the Linux Terminal of a Google Pixel phone.
+This kit runs Akai's official **MPC Sample 1.3.0** firmware, unmodified, in the Linux Terminal of a Pixel/Android phone.
 It behaves like the hardware:
 
 - **The microSD card** is a folder on your phone.

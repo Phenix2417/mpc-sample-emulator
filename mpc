@@ -1,5 +1,5 @@
 #!/bin/bash
-# mpc - Akai's official MPC Sample program in the Pixel's Linux Terminal. One command for everything:
+# mpc - Akai's official MPC Sample program in the Linux Terminal of a Pixel/Android phone. One command for everything:
 #
 #   ./mpc install [updater]   one-step install: tools, firmware, factory content, card, autostart, then run
 #   ./mpc run [seconds]       start the MPC (until Ctrl+C, or for that many seconds)
@@ -345,7 +345,7 @@ cmd_install() {
     ok()  { printf '  [OK] %s\n' "$1"; }
     bad() { printf '  [--] %s\n' "$1"; [ -n "${2:-}" ] && printf '       Fix: %s\n' "$2"; FAIL=$((FAIL + 1)); }
     echo "== Pre-flight check"
-    [ "$(uname -m)" = aarch64 ] && ok "CPU is ARM64" || bad "CPU is $(uname -m), not ARM64" "use the Pixel's Linux Terminal"
+    [ "$(uname -m)" = aarch64 ] && ok "CPU is ARM64" || bad "CPU is $(uname -m), not ARM64" "use the Linux Terminal of a Pixel/Android phone"
     local f MISS=""; for f in mpc.py addon.c helpers.c; do [ -f "$f" ] || MISS="$MISS $f"; done
     [ -z "$MISS" ] && ok "Kit files complete" || bad "Kit incomplete (missing:$MISS)" "unzip the kit zip again"
     ls "$SHARED" >/dev/null 2>&1 && ok "Phone storage reachable ($SHARED)" || bad "Can't reach $SHARED" "reopen the Terminal, or MPC_SHARED=<folder>"
