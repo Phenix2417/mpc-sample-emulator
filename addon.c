@@ -2156,6 +2156,9 @@ void panel_touch_follow(int on) {
     for (int c = 0; c < 4 && fd < 0; c++) {
         char path[] = "/dev/dri/card0"; path[13] = (char)('0' + c);
         fd = (int)syscall(SYS_openat, AT_FDCWD, path, O_RDWR | O_CLOEXEC, 0);
+        /* the first to open a display nobody owns becomes its owner (DRM master): give that up at once, or the
+         * program that draws the screen can't take it ("Acquire display ... Device or resource busy") */
+        if (fd >= 0) syscall(SYS_ioctl, fd, DRM_IO(0x1f), 0);
         struct drm_mode_modeinfo m;
         if (fd >= 0 && !scan_outputs(fd, &m)) { syscall(SYS_close, fd); fd = -1; }
     }
