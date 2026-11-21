@@ -1604,6 +1604,21 @@ static void shift_reveal(void) {
     for (int j = 0; j < 128; j++)
         if (!led_instant(j) && btn_led[j] != btn_shift_target[j]) { btn_led[j] = btn_shift_target[j]; light_changed(BTN, j); }
 }
+/* The surface's answer to "where are the controls?" (inMusic SysEx 0x42, sent by apps made for the MPC such as Melodee):
+ * the absolute positions of MAIN VOLUME (CC 19: the phone's volume buttons do its job, so full), K1-K3 and the fader,
+ * then encoder CC 100 value 0 - as the hardware answers. Not for the stock app, which works as it is without it. */
+static void midi(int a, int b, int c);
+static void positions(void) {
+    extern char *program_invocation_short_name;
+    if (str_eq(program_invocation_short_name, "MPC Sample")) return;
+    int k[3] = { 64, 64, 64 }, f = 127;
+    for (int i = 0; i < nit; i++) {
+        if (it[i].kind == KNOB && it[i].num >= 16 && it[i].num <= 18) k[it[i].num - 16] = it[i].val;
+        if (it[i].kind == FADER) f = it[i].val;
+    }
+    midi(0xB0, 19, 127); midi(0xB0, 16, k[0]); midi(0xB0, 17, k[1]); midi(0xB0, 18, k[2]); midi(0xB0, 20, f); midi(0xB0, 100, 0);
+    shim_log("panel: answered the control position request", 0, 0);
+}
 /* called by the add-on with every block the program writes to the control chip (card 8) */
 void panel_midi_out(const unsigned char *b, unsigned long n) {
     static unsigned char m[16]; static int k, sysex, run;
@@ -1623,6 +1638,7 @@ void panel_midi_out(const unsigned char *b, unsigned long n) {
                         shim_log("sysex m5*1e6+m6*1e3+val", 0, (unsigned)m[5] * 1000000u + (unsigned)m[6] * 1000u + (unsigned)dv);
                     }
                 }
+                if (k == 6 && m[0] == 0x47 && m[1] == 0x7F && m[2] == 0x5C && m[3] == 0x42 && m[4] == 0 && m[5] == 0) positions();
                 if (k == 10 && m[0] == 0x47 && m[1] == 0x7F && m[2] == 0x5C && m[3] == 0x65 && m[5] == 0x04 && m[6] <= 16) {
                     int rgb = (led8(m[7]) << 16) | (led8(m[8]) << 8) | led8(m[9]);
                     if (pad_rgb[m[6]] != rgb) {
@@ -1929,6 +1945,7 @@ static int new_mode(int fd, struct drm_mode_modeinfo *out) {
     return conn_mode(fd, conn_id, out, 0);
 }
 
+static void touch_reader_start(void);   /* touch, below */
 /* Called from the add-on's ioctl() for DRM requests. Returns 1 if handled (*ret set). */
 int panel_ioctl(int fd, unsigned long req, void *arg, long *ret) {
     if (!panel_on() || !arg) return 0;
@@ -2002,7 +2019,7 @@ int panel_ioctl(int fd, unsigned long req, void *arg, long *ret) {
         *fbp = fb;
         if (req == DRM_IOCTL_MODE_PAGE_FLIP) ((struct drm_mode_crtc_page_flip *)arg)->crtc_id = prog_crtc;
         else ((struct drm_mode_crtc *)arg)->crtc_id = prog_crtc;
-        if (*ret >= 0) { front = b; if (nold) drop_old(); } else errno = e;
+        if (*ret >= 0) { front = b; if (nold) drop_old(); touch_reader_start(); } else errno = e;
         return 1;
     }
     if (req == DRM_IOCTL_MODE_DIRTYFB && front >= 0) {
@@ -2146,28 +2163,6 @@ static int resolve(void) {
     r_get = (struct libinput_event *(*)(struct libinput *))dlsym(RTLD_NEXT, "libinput_get_event");
     return r_get && r_type && r_touch && r_x && r_y && r_slot && r_destroy;
 }
-static int touch_keep;   /* devrelay: turn touches into panel presses while another program draws the screen */
-/* devrelay calls this about once a second while a program other than the stock app (one that doesn't read the
- * touchscreen itself, e.g. Melodee) has the display: the panel's touch areas follow the display's size, without
- * taking the display. on = 0: the stock app reads the touchscreen itself again. */
-void panel_touch_follow(int on) {
-    static int fd = -1;
-    touch_keep = 0;
-    if (!on) return;
-    for (int c = 0; c < 4 && fd < 0; c++) {
-        char path[] = "/dev/dri/card0"; path[13] = (char)('0' + c);
-        fd = (int)syscall(SYS_openat, AT_FDCWD, path, O_RDWR | O_CLOEXEC, 0);
-        /* the first to open a display nobody owns becomes its owner (DRM master): give that up at once, or the
-         * program that draws the screen can't take it ("Acquire display ... Device or resource busy") */
-        if (fd >= 0) syscall(SYS_ioctl, fd, DRM_IO(0x1f), 0);
-        struct drm_mode_modeinfo m;
-        if (fd >= 0 && !scan_outputs(fd, &m)) { syscall(SYS_close, fd); fd = -1; }
-    }
-    struct drm_mode_modeinfo m;
-    if (fd < 0 || !scan_outputs(fd, &m)) return;
-    if (!nit || m.hdisplay != DW || m.vdisplay != DH) { DW = m.hdisplay; DH = m.vdisplay; layout(); }
-    touch_keep = 1;
-}
 static int slot_of(struct libinput_event_touch *te) { int s = r_slot(te) + 1; return s < 0 ? 0 : s > 15 ? 15 : s; }
 static int touch_mapped;
 
@@ -2175,7 +2170,7 @@ struct libinput_event *libinput_get_event(struct libinput *li) {
     if (!resolve()) { errno = ENOSYS; return 0; }
     for (;;) {
         struct libinput_event *ev = r_get(li);
-        if (!ev || !panel_on() || (front < 0 && !touch_keep)) return ev;
+        if (!ev || !panel_on() || front < 0) return ev;
         int t = r_type(ev);
         if (t < T_DOWN || t > T_CANCEL) return ev;
         struct libinput_event_touch *te = r_touch(ev);
@@ -2193,6 +2188,47 @@ struct libinput_event *libinput_get_event(struct libinput *li) {
         }
         return ev;
     }
+}
+/* Apps made for the MPC (Melodee's sample-base, ...) draw the screen but don't read a touchscreen - the MPC has none.
+ * For them the panel reads it itself, on its own thread, through the wrapper above: taps become control-surface MIDI and
+ * the panel shows them, as with the stock app. Started at their first picture; not for programs with libinput loaded. */
+#include <poll.h>
+struct li_if { int (*open_restricted)(const char *, int, void *); void (*close_restricted)(int, void *); };
+static int li_open(const char *path, int flags, void *u) { (void)u; int fd = (int)syscall(SYS_openat, AT_FDCWD, path, flags | O_CLOEXEC, 0); return fd < 0 ? -errno : fd; }
+static void li_close(int fd, void *u) { (void)u; syscall(SYS_close, fd); }
+static const struct li_if li_iface = { li_open, li_close };
+static void *touch_reader(void *arg) {
+    (void)arg;
+    void *ud = dlopen("libudev.so.1", RTLD_NOW | RTLD_GLOBAL), *li = dlopen("libinput.so.10", RTLD_NOW | RTLD_GLOBAL);
+    if (!ud || !li) { shim_log("panel: no libinput - the panel can't be touched", 0, 0); return 0; }
+    void *(*udev_new)(void) = (void *(*)(void))dlsym(ud, "udev_new");
+    void *(*create)(const void *, void *, void *) = (void *(*)(const void *, void *, void *))dlsym(li, "libinput_udev_create_context");
+    int (*assign)(void *, const char *) = (int (*)(void *, const char *))dlsym(li, "libinput_udev_assign_seat");
+    int (*getfd)(void *) = (int (*)(void *))dlsym(li, "libinput_get_fd");
+    int (*dispatch)(void *) = (int (*)(void *))dlsym(li, "libinput_dispatch");
+    void (*destroy)(void *) = (void (*)(void *))dlsym(li, "libinput_event_destroy");
+    if (!udev_new || !create || !assign || !getfd || !dispatch || !destroy) return 0;
+    void *u = udev_new(), *ctx = u ? create(&li_iface, 0, u) : 0;
+    if (!ctx || assign(ctx, "seat0") != 0) { shim_log("panel: no touch seat", 0, 0); return 0; }
+    int fd = getfd(ctx);
+    shim_log("panel: reading the touchscreen for this program", 0, 0);
+    for (;;) {
+        struct pollfd pf = { fd, POLLIN, 0 };
+        if (poll(&pf, 1, -1) < 0 && errno != EINTR) break;
+        dispatch(ctx);
+        void *ev;
+        while ((ev = libinput_get_event(ctx))) destroy(ev);   /* panel touches are taken by the wrapper */
+    }
+    return 0;
+}
+static void touch_reader_start(void) {
+    static int started;
+    if (started) return;
+    started = 1;
+    extern char *program_invocation_short_name;
+    if (str_eq(program_invocation_short_name, "MPC Sample") || dlsym(RTLD_DEFAULT, "libinput_dispatch")) return;
+    pthread_t th; pthread_attr_t a; pthread_attr_init(&a); pthread_attr_setdetachstate(&a, PTHREAD_CREATE_DETACHED);
+    if (pthread_create(&th, &a, touch_reader, 0) != 0) shim_log("panel: no touch thread", 0, 0);
 }
 /* udev: the program watches for display changes; swallow "drm" ones and let the panel follow them */
 struct udev_monitor; struct udev_device;

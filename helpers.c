@@ -403,7 +403,6 @@ int main(void) {
 
     int (*present)(const unsigned char *) = (int (*)(const unsigned char *))dlsym(RTLD_DEFAULT, "panel_fb_present");
     void (*release)(void) = (void (*)(void))dlsym(RTLD_DEFAULT, "panel_fb_release");
-    void (*touch_follow)(int) = (void (*)(int))dlsym(RTLD_DEFAULT, "panel_touch_follow");
     if (!present) say("the add-on (fbshim.so) is not loaded: frames and the control chip are not available", 0);
 
     /* the control surface's MIDI port for static programs. Best: a raw pseudo-terminal (two-way, every byte
@@ -470,7 +469,6 @@ int main(void) {
             app = app_running(deep);
             if (!deep && was == 1 && !app) app = 1;   /* found by its open display: only the deep look can tell it's gone */
             if (app && owned) { if (release) release(); owned = 0; say(app == 2 ? "the MPC app is up: display handed over" : "another program draws the screen: display handed over", 0); }
-            if (touch_follow && deep) touch_follow(app == 1);   /* that program doesn't read the touchscreen: the panel's touches go on from here */
             if (fifo) {
                 int c = fifo_client(fdev, fino);
                 if (!c && fifo_open) { unsigned char b[4096]; while (read(m, b, sizeof b) > 0) {} }   /* no stale bytes for the next one */
