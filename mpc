@@ -42,10 +42,16 @@ say() { echo "== $*"; }
 # the kit used to live in ~/mpc-pixel-kit: move its unpacked firmware here instead of unpacking it again (once)
 OLD="$(dirname "$HERE")/mpc-pixel-kit"
 if [ "$OLD" != "$HERE" ] && [ -f "$OLD/work/.extracted" ] && [ ! -e "$WORK" ]; then
+    pids=""
     for p in $(cat "$OLD/work/run.pid" 2>/dev/null) $(pgrep -f "[4]-run.sh"); do   # its MPC, if running: stop it
-        tr '\0' ' ' 2>/dev/null < "/proc/$p/cmdline" | grep -q 'mpc run\|4-run.sh' && sudo kill -TERM "$p" 2>/dev/null
+        tr '\0' ' ' 2>/dev/null < "/proc/$p/cmdline" | grep -q 'mpc run\|4-run.sh' && sudo kill -TERM "$p" 2>/dev/null && pids="$pids $p"
     done
-    for _ in $(seq 30); do grep -q " $OLD/work/" /proc/self/mountinfo || break; sleep 1; done
+    for _ in $(seq 30); do alive=; for p in $pids; do [ -d "/proc/$p" ] && alive=1; done; [ -z "$alive" ] && break; sleep 1; done
+    sudo pkill -9 -f "^/usr/bin/MPC Sample"; sudo pkill -f "[m]pc.py (ctl|disks)"; sudo pkill -f "[a]udiobridge "; sudo pkill -f "[m]pc-devrelay"
+    # what it left mounted inside (the card, the chroot's /proc, /dev...): taken off, children first - nothing is deleted
+    awk -v d="$OLD/work/" 'index($5,d)==1 {print $5}' /proc/self/mountinfo | sort -r | while IFS= read -r m; do
+        m=$(printf '%b' "$m"); fusermount3 -u "$m" 2>/dev/null || sudo umount -l "$m" 2>/dev/null
+    done
     if grep -q " $OLD/work/" /proc/self/mountinfo; then
         echo "!! $OLD is still in use, so its firmware wasn't moved. Close and reopen the Terminal, then run this again."
     else
@@ -74,7 +80,9 @@ stop_run() {   # stop a run and let its own shutdown finish (it takes the card o
     return 0
 }
 updaters() {   # Akai MPC Sample updater candidates in the phone storage (top level and one folder deep, e.g. MPC-Sample)
-    find "$SHARED" -maxdepth 2 -type f \( -iname '*.exe' -o -iname '*.img' -o -iname '*mpc*sample*' \) ! -iname '*mpc-sample-emulator*' 2>/dev/null
+    # an .exe or .img, or a file named like Akai's updater (a mod's zip such as Melodee-MPC-Sample-v0.6.3.zip is not one)
+    find "$SHARED" -maxdepth 2 -type f \( -iname '*.exe' -o -iname '*.img' -o -iname '*mpc*sample*updat*' \) \
+        ! -iname '*mpc-sample-emulator*' ! -iname '*mpc-pixel-kit*' 2>/dev/null
 }
 
 # =============================== setup: every Linux tool the kit uses ===============================
