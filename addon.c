@@ -748,6 +748,8 @@ int close(int fd) {
 }
 
 /* ---- DRM: show only connected outputs ---- */
+#include <drm/drm.h>
+#include <drm/drm_mode.h>
 struct card_res { uint64_t fb_ptr, crtc_ptr, conn_ptr, enc_ptr; uint32_t n_fb, n_crtc, n_conn, n_enc, minw, maxw, minh, maxh; };
 struct get_conn { uint64_t enc_ptr, modes_ptr, props_ptr, vals_ptr;
                   uint32_t n_modes, n_props, n_enc, encoder_id, connector_id, type, type_id, connection, mmw, mmh, subpixel, pad; };
@@ -794,12 +796,46 @@ static int getresources(int fd, struct card_res *user) {
     return 0;
 }
 
+/* Apps written for the MPC itself (Melodee's sample-base, ...) look for the MPC's 320 x 240 panel among the display's modes.
+ * The phone's display has only its window size, so other programs than the stock app also see a 320 x 240 mode; the
+ * panel turns their picture of that size into the MPC screen as it does the stock app's (the stock app is left as it is). */
+static int panel_mode_wanted(void) {
+    static int w = -1;
+    if (w < 0) {
+        extern char *program_invocation_short_name;
+        const char *e = getenv("MPC_PANEL");
+        w = !(e && e[0] == '0') && !str_eq(program_invocation_short_name, "MPC Sample");
+    }
+    return w;
+}
+static int getconnector(int fd, struct get_conn *c) {
+    uint32_t room = c->n_modes; uint64_t up = c->modes_ptr;
+    long r = syscall(SYS_ioctl, fd, IOC_GETCONNECTOR, c);
+    if (r != 0 || c->connection != 1 || !panel_mode_wanted()) return (int)r;
+    uint32_t n = c->n_modes;
+    if (up && room >= n + 1) {
+        struct drm_mode_modeinfo m; char *z = (char *)&m; for (unsigned i = 0; i < sizeof m; i++) z[i] = 0;
+        m.clock = 6400; m.hdisplay = 320; m.hsync_start = 336; m.hsync_end = 352; m.htotal = 400;
+        m.vdisplay = 240; m.vsync_start = 244; m.vsync_end = 248; m.vtotal = 266; m.vrefresh = 60;
+        m.type = DRM_MODE_TYPE_DRIVER; cpy(m.name, "320x240", sizeof m.name);
+        ((struct drm_mode_modeinfo *)(uintptr_t)up)[n] = m;
+    }
+    c->n_modes = n + 1;
+    return 0;
+}
+
 int ioctl(int fd, unsigned long req, ...) {
     va_list ap; va_start(ap, req); void *arg = va_arg(ap, void *); va_end(ap);
     { struct seqst *sqs = seq_of(fd); if (sqs) return seq_ioctl(sqs, req, arg); }
     int k = fake_find(fd);
     if (k >= 0) return fake_ioctl(k, req, arg);
     if (req == IOC_GETRESOURCES && arg) return getresources(fd, arg);
+    if (req == IOC_GETCONNECTOR && arg) return getconnector(fd, arg);
+    if (req == DRM_IO(0x1e)) {   /* SET_MASTER: the boot-menu helper (devrelay) may still be handing the display over */
+        long r;
+        for (int i = 0; (r = syscall(SYS_ioctl, fd, req, arg)) != 0 && i < 60; i++) { struct timespec t = { 0, 50000000 }; syscall(SYS_nanosleep, &t, 0); }
+        return (int)r;
+    }
     if (((req >> 8) & 0xff) == 'd') { long r; if (panel_ioctl(fd, req, arg, &r)) return (int)r; }
     if (((req >> 8) & 0xff) == 'U') { long r; if (jack_ioctl(fd, req, arg, &r)) return (int)r; }
     if ((req == SNDRV_PCM_IOCTL_HW_REFINE || req == SNDRV_PCM_IOCTL_HW_PARAMS) && arg && is_pcmp(fd)) {
@@ -2109,6 +2145,25 @@ static int resolve(void) {
     r_get = (struct libinput_event *(*)(struct libinput *))dlsym(RTLD_NEXT, "libinput_get_event");
     return r_get && r_type && r_touch && r_x && r_y && r_slot && r_destroy;
 }
+static int touch_keep;   /* devrelay: turn touches into panel presses while another program draws the screen */
+/* devrelay calls this about once a second while a program other than the stock app (one that doesn't read the
+ * touchscreen itself, e.g. Melodee) has the display: the panel's touch areas follow the display's size, without
+ * taking the display. on = 0: the stock app reads the touchscreen itself again. */
+void panel_touch_follow(int on) {
+    static int fd = -1;
+    touch_keep = 0;
+    if (!on) return;
+    for (int c = 0; c < 4 && fd < 0; c++) {
+        char path[] = "/dev/dri/card0"; path[13] = (char)('0' + c);
+        fd = (int)syscall(SYS_openat, AT_FDCWD, path, O_RDWR | O_CLOEXEC, 0);
+        struct drm_mode_modeinfo m;
+        if (fd >= 0 && !scan_outputs(fd, &m)) { syscall(SYS_close, fd); fd = -1; }
+    }
+    struct drm_mode_modeinfo m;
+    if (fd < 0 || !scan_outputs(fd, &m)) return;
+    if (!nit || m.hdisplay != DW || m.vdisplay != DH) { DW = m.hdisplay; DH = m.vdisplay; layout(); }
+    touch_keep = 1;
+}
 static int slot_of(struct libinput_event_touch *te) { int s = r_slot(te) + 1; return s < 0 ? 0 : s > 15 ? 15 : s; }
 static int touch_mapped;
 
@@ -2116,7 +2171,7 @@ struct libinput_event *libinput_get_event(struct libinput *li) {
     if (!resolve()) { errno = ENOSYS; return 0; }
     for (;;) {
         struct libinput_event *ev = r_get(li);
-        if (!ev || !panel_on() || front < 0) return ev;
+        if (!ev || !panel_on() || (front < 0 && !touch_keep)) return ev;
         int t = r_type(ev);
         if (t < T_DOWN || t > T_CANCEL) return ev;
         struct libinput_event_touch *te = r_touch(ev);

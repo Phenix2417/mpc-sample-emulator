@@ -301,14 +301,17 @@ static void on_sig(int s) { (void)s; stop = 1; }
 static long ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1000L + t.tv_nsec / 1000000L; }
 static void say(const char *a, const char *b) { fprintf(stderr, "devrelay: %s%s%s\n", a, b ? " " : "", b ? b : ""); }
 
-/* is the MPC app running? (then it owns the display and the touchscreen) */
-static int app_running(void) {
+/* who has the display? 2 = the stock MPC app (it reads the touchscreen itself), 1 = another program that draws
+ * with DRM itself - an app made for the MPC like Melodee's sample-base, found by name or (deep = 1) by an open
+ * /dev/dri device: the panel's touches still come from here - 0 = nobody (a static program's /dev/fb0 is shown) */
+static int app_running(int deep) {
     DIR *d = opendir("/proc");
     struct dirent *e;
     int found = 0;
-    char p[300], c[64];
-    while (d && (e = readdir(d))) {
-        if (e->d_name[0] < '0' || e->d_name[0] > '9') continue;
+    char p[300], c[64], self[16];
+    snprintf(self, sizeof self, "%d", (int)getpid());
+    while (d && found < 2 && (e = readdir(d))) {
+        if (e->d_name[0] < '0' || e->d_name[0] > '9' || !strcmp(e->d_name, self)) continue;
         snprintf(p, sizeof p, "/proc/%s/comm", e->d_name);
         int fd = open(p, O_RDONLY | O_CLOEXEC);
         if (fd < 0) continue;
@@ -317,7 +320,23 @@ static int app_running(void) {
         if (n <= 0) continue;
         c[n] = 0;
         if (c[n - 1] == '\n') c[n - 1] = 0;
-        if (!strcmp(c, "MPC Sample")) { found = 1; break; }
+        if (!strcmp(c, "MPC Sample")) { found = 2; break; }
+        if (!strcmp(c, "sample-base") || !strcmp(c, "mpcsimple")) { found = 1; continue; }
+        if (!deep || found) continue;
+        char fdd[300];
+        struct stat rs, me;   /* only programs in this system (the MPC's chroot), not the phone's own */
+        snprintf(fdd, sizeof fdd, "/proc/%s/root", e->d_name);
+        if (stat(fdd, &rs) != 0 || stat("/", &me) != 0 || rs.st_dev != me.st_dev || rs.st_ino != me.st_ino) continue;
+        snprintf(fdd, sizeof fdd, "/proc/%s/fd", e->d_name);
+        DIR *f = opendir(fdd);
+        struct dirent *g;
+        while (f && (g = readdir(f))) {
+            char fp[600], t[64];
+            snprintf(fp, sizeof fp, "%s/%s", fdd, g->d_name);
+            ssize_t k = readlink(fp, t, sizeof t - 1);
+            if (k > 0) { t[k] = 0; if (!strncmp(t, "/dev/dri/", 9)) { found = 1; break; } }
+        }
+        if (f) closedir(f);
     }
     if (d) closedir(d);
     return found;
@@ -384,6 +403,7 @@ int main(void) {
 
     int (*present)(const unsigned char *) = (int (*)(const unsigned char *))dlsym(RTLD_DEFAULT, "panel_fb_present");
     void (*release)(void) = (void (*)(void))dlsym(RTLD_DEFAULT, "panel_fb_release");
+    void (*touch_follow)(int) = (void (*)(int))dlsym(RTLD_DEFAULT, "panel_touch_follow");
     if (!present) say("the add-on (fbshim.so) is not loaded: frames and the control chip are not available", 0);
 
     /* the control surface's MIDI port for static programs. Best: a raw pseudo-terminal (two-way, every byte
@@ -436,7 +456,7 @@ int main(void) {
 
     int lfd = present ? touch_open() : -1;
     int c8 = -1;
-    long c8_retry = 0, hup_until = 0, app_chk = 0, last_pres = 0;
+    long c8_retry = 0, hup_until = 0, app_chk = 0, last_pres = 0, deep_chk = 0;
     int dirty = 1, owned = 0, app = 0, nframes = 0, fifo_open = 0;   /* dirty: take the display (black) at once */
     static unsigned char frame[FRAME];
     say("ready", 0);
@@ -445,8 +465,12 @@ int main(void) {
         long now = ms();
         if (now - app_chk >= 150) {
             app_chk = now;
-            app = app_running();
-            if (app && owned) { if (release) release(); owned = 0; say("the MPC app is up: display handed over", 0); }
+            int deep = now - deep_chk >= 1000, was = app;
+            if (deep) deep_chk = now;
+            app = app_running(deep);
+            if (!deep && was == 1 && !app) app = 1;   /* found by its open display: only the deep look can tell it's gone */
+            if (app && owned) { if (release) release(); owned = 0; say(app == 2 ? "the MPC app is up: display handed over" : "another program draws the screen: display handed over", 0); }
+            if (touch_follow && deep) touch_follow(app == 1);   /* that program doesn't read the touchscreen: the panel's touches go on from here */
             if (fifo) {
                 int c = fifo_client(fdev, fino);
                 if (!c && fifo_open) { unsigned char b[4096]; while (read(m, b, sizeof b) > 0) {} }   /* no stale bytes for the next one */

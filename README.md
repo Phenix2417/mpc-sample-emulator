@@ -187,16 +187,24 @@ Put the zips in the MPC-Sample folder and run `./mpc card`. The installer also r
 ### What is emulated for mods
 
 - **Programs:** mods' programs, both dynamically linked and static (like SampleBoot's menu).
-- **Screen:** `/dev/fb0`.
+- **Screen:** `/dev/fb0`, and the display device (DRM) with the MPC's 320×240 panel mode, for apps that drive the panel
+  themselves (like Melodee).
 - **Control surface:** its MIDI on card 8, including the encoder and pads.
-- **Start and stop:** `systemctl start/stop ac50` for the stock app.
+- **Start and stop:** `systemctl start/stop ac50` for the stock app, `systemd-run`, and service units an app writes to
+  `/run/systemd/system` (Melodee's `sample-base.service`).
 - **Card in `/proc/mounts`:** shown as `/dev/mmcblk1p1` under `/media/`.
 
 Hardware extras the phone doesn't have are skipped: the 16-output USB audio gadget and raw SD card access.
 
+Some mods check the firmware themselves. Melodee, for example, starts only on the MPC Sample program of firmware
+1.3.0.12 exactly (it compares the program's checksum); with another updater it leaves the stock app running, as it
+would on the hardware.
+
 **Logs:**
 
 - `work/run/script-runner.log`: the autorun's output.
+- `work/run/mpc-*.log` and other `.log` files there: what mods started in the background (`systemd-run`, service
+  units) printed, and logs mods keep in `/run` (Melodee's `melodee-sd.log`).
 - `work/run/app.log`: the stock app.
 - `autorun/sampleboot/last-boot.log`: written by SampleBoot itself.
 

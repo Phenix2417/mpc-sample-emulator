@@ -70,7 +70,7 @@ stop_run() {   # stop a run and let its own shutdown finish (it takes the card o
         for _ in $(seq 30); do [ -z "$(run_pids)" ] && break; sleep 1; done
     fi
     sudo pkill -9 -f "$APP_RE"; sudo pkill -f "[m]pc.py (ctl|disks)"; sudo pkill -f "[m]pcctl.py serve"; sudo pkill -f "[e]disks.py"
-    sudo pkill -f "[a]udiobridge "
+    sudo pkill -f "[a]udiobridge "; sudo pkill -f "/run/sample-base[^ ]*/sample-base"
     return 0
 }
 updaters() {   # Akai MPC Sample updater candidates in the phone storage (top level and one folder deep, e.g. MPC-Sample)
@@ -412,7 +412,7 @@ cmd_run() {
     release_card() { unmount_sd kids; rescue_sd; sudo umount -l "$WORK/cardbase" 2>/dev/null; unmount_sd; rescue_sd; }
     cleanup() {
         if [ -n "$BOOT" ]; then   # undo the boot changes to the rootfs
-            sudo pkill -INT -f "$APP_RE" 2>/dev/null; sudo pkill -f "[s]ampleboot" 2>/dev/null; sudo rm -f "$ROOT/run/ac50.stopped"
+            sudo pkill -INT -f "$APP_RE" 2>/dev/null; sudo pkill -f "[s]ampleboot" 2>/dev/null; sudo pkill -f "/run/sample-base[^ ]*/sample-base" 2>/dev/null; sudo rm -f "$ROOT/run/ac50.stopped"
             if [ -n "$RELAY" ]; then
                 sudo pkill -TERM -f "[m]pc-devrelay" 2>/dev/null; sleep 0.3
                 [ "$(readlink "$ROOT/dev/fb0" 2>/dev/null)" = /run/mpc-fb0 ] && sudo rm -f "$ROOT/dev/fb0"
@@ -420,15 +420,20 @@ cmd_run() {
                 case "$(readlink "$ROOT/dev/snd/midiC8D0" 2>/dev/null)" in /dev/pts/*|/run/mpc-midi8) sudo rm -f "$ROOT/dev/snd/midiC8D0" ;; esac
             fi
             sudo rm -f "$ROOT/etc/ld.so.preload"
-            for S in /usr/bin/systemctl /bin/systemctl; do [ -e "$ROOT$S.mpcreal" ] && sudo mv -f "$ROOT$S.mpcreal" "$ROOT$S"; done
+            for S in /usr/bin/systemctl /bin/systemctl /usr/bin/systemd-run /bin/systemd-run; do
+                if [ -e "$ROOT$S.mpcreal" ]; then sudo mv -f "$ROOT$S.mpcreal" "$ROOT$S"
+                else case "$(readlink "$ROOT$S" 2>/dev/null)" in /tmp/mpc-*) sudo rm -f "$ROOT$S" ;; esac; fi
+            done
         fi
         [ -n "$APID" ] && { sudo kill -INT "$APID" 2>/dev/null; sleep 1; sudo kill -KILL "$APID" 2>/dev/null; }
         for p in $LIVEPIDS; do kill "$p" 2>/dev/null; done; pkill -f "[i]notifywait.*az01-internal-sd" 2>/dev/null
         for p in "${PIDS[@]}"; do sudo kill "$p" 2>/dev/null; done
         sudo pkill -f "[m]pc.py (ctl|disks)"; sudo pkill -f "[a]udiobridge "
+        sudo cp "$ROOT"/run/*.log "$OUT/" 2>/dev/null   # the mods' logs in /run (Melodee's melodee-sd.log, ...)
         for m in run dev sys proc; do mountpoint -q "$ROOT/$m" && sudo umount -R -l "$ROOT/$m"; done
         release_card
-        sudo cp "$ROOT/tmp/fbshim.log" "$OUT/" 2>/dev/null; sudo chown -R "$(id -u):$(id -g)" "$OUT" 2>/dev/null
+        sudo cp "$ROOT/tmp/fbshim.log" "$ROOT"/tmp/mpc-*.log "$OUT/" 2>/dev/null   # the add-on's and the mods' logs
+        sudo chown -R "$(id -u):$(id -g)" "$OUT" 2>/dev/null
         [ "$(cat "$PIDF" 2>/dev/null)" = "$$" ] && rm -f "$PIDF"
     }
     trap cleanup EXIT; trap 'exit 130' INT TERM HUP   # Ctrl+C, ./mpc stop, closing the Terminal: clean shutdown
@@ -544,7 +549,7 @@ cmd_run() {
         gcc -O2 -DDEVRELAY -o "$WORK/devrelay" "$HERE/helpers.c" -ldl || die "devrelay did not compile"
         echo "$SUM" > "$WORK/build.sum"; say "Add-on built"
     fi
-    sudo install -m 644 "$WORK/addon.so" "$ROOT/tmp/fbshim.so"; sudo rm -f "$ROOT/tmp/fb0.raw" "$ROOT/tmp/fbshim.log"
+    sudo install -m 644 "$WORK/addon.so" "$ROOT/tmp/fbshim.so"; sudo rm -f "$ROOT/tmp/fb0.raw" "$ROOT/tmp/fbshim.log" "$ROOT"/tmp/mpc-*.log
 
     # ---- sound: the phone's card plays OR records, and the program always opens both. So its sound goes through two
     # pipes served by audiobridge, which plays it and switches the card to the mic while SAMPLE RECORD is lit ----
@@ -589,9 +594,12 @@ cmd_run() {
     BOOT=1
     sudo rm -f "$ROOT/run/ac50.stopped" "$ROOT/run/ac50.starting"
     echo /tmp/fbshim.so | sudo tee "$ROOT/etc/ld.so.preload" >/dev/null
+    sudo mkdir -p "$ROOT/run/systemd/system" "$ROOT/run/mpc-units"
     sudo tee "$ROOT/tmp/mpc-systemctl" >/dev/null <<'SH'
 #!/bin/sh
-# systemctl stand-in: ac50.service is the MPC app (/run/ac50.stopped makes a stop stick until a start)
+# systemctl stand-in (there is no systemd in the emulator). ac50.service is the MPC app (/run/ac50.stopped makes a
+# stop stick until a start); units an app writes to /run/systemd/system (Melodee's sample-base.service) are run by
+# /tmp/mpc-unit; anything else is accepted and ignored.
 app() { for p in /proc/[0-9]*; do [ "$(tr -d '\000' <"$p/comm" 2>/dev/null)" = "MPC Sample" ] && { echo "${p#/proc/}"; return 0; }; done; return 1; }
 launch() {   # unless it runs or a start is under way (the app takes a few seconds)
     app >/dev/null && return 0
@@ -599,23 +607,81 @@ launch() {   # unless it runs or a start is under way (the app takes a few secon
     date +%s > /run/ac50.starting; setsid /usr/bin/launch-ac50 >/tmp/ac50.log 2>&1 &
 }
 kill_app() { p=$(app) && { kill -INT "$p" 2>/dev/null; sleep 1; kill -KILL "$p" 2>/dev/null; }; }
-c=$1; shift; svc=; for a in "$@"; do case "$a" in ac50.service|ac50) svc=ac50;; esac; done
+up() { p=$(cat "/run/mpc-units/$1.pid" 2>/dev/null) && [ -n "$p" ] && kill -0 "$p" 2>/dev/null; }
+unit_start() { [ -f "/run/systemd/system/$1.service" ] && ! up "$1" && setsid /tmp/mpc-unit "$1" </dev/null >/dev/null 2>&1 & }
+unit_stop() { p=$(cat "/run/mpc-units/$1.pid" 2>/dev/null) && kill -TERM "$p" 2>/dev/null
+              for _ in 1 2 3 4 5 6 7 8 9 10; do up "$1" || return 0; sleep 1; done; }
+c=$1; shift; units=; quiet=
+for a in "$@"; do case "$a" in --quiet|-q) quiet=1 ;; -*) ;; *) units="$units ${a%.service}" ;; esac; done
+rc=0
+for u in $units; do
+    case "$c:$u" in
+      start:ac50)   rm -f /run/ac50.stopped; launch ;;
+      stop:ac50)    : > /run/ac50.stopped; kill_app ;;
+      restart:ac50) rm -f /run/ac50.stopped; kill_app; launch ;;
+      is-active:ac50) app >/dev/null || rc=3 ;;
+      start:*)      unit_start "$u" ;;
+      stop:*)       unit_stop "$u" ;;
+      restart:*)    unit_stop "$u"; unit_start "$u" ;;
+      is-active:*)  up "$u" || rc=3 ;;
+      is-failed:*)  rc=1 ;;
+      is-enabled:*) rc=1 ;;
+    esac
+done
 case "$c" in
-  start)   [ "$svc" = ac50 ] && { rm -f /run/ac50.stopped; launch; } ;;
-  stop)    [ "$svc" = ac50 ] && { : > /run/ac50.stopped; kill_app; } ;;
-  restart) [ "$svc" = ac50 ] && { rm -f /run/ac50.stopped; kill_app; launch; } ;;
-  is-active) [ "$svc" = ac50 ] && app >/dev/null && { echo active; exit 0; }; echo inactive; exit 3 ;;
-  is-system-running) echo running; exit 0 ;;
-  is-enabled) exit 1 ;;
+  is-active) [ -n "$quiet" ] || { [ $rc = 0 ] && echo active || echo inactive; } ;;
+  is-system-running) echo running ;;
 esac
-exit 0
+exit $rc
+SH
+    sudo tee "$ROOT/tmp/mpc-unit" >/dev/null <<'SH'
+#!/bin/sh
+# runs one unit from /run/systemd/system as systemd would: ExecStartPre, ExecStart (until it ends or is stopped),
+# ExecStopPost. Its output: /tmp/mpc-unit-<name>.log
+U=/run/systemd/system/$1.service; P=/run/mpc-units/$1.pid
+exec >"/tmp/mpc-unit-$1.log" 2>&1
+echo $$ > "$P"
+cmds() { sed -n "s/^$1=//p" "$U" | sed 's/^[-@+!]*//'; }
+cmds ExecStartPre | while IFS= read -r c; do echo "pre: $c"; sh -c "$c"; done
+c=$(cmds ExecStart | head -1); echo "start: $c"
+sh -c "exec $c" &
+child=$!
+trap 'kill -TERM $child 2>/dev/null' TERM INT
+while kill -0 $child 2>/dev/null; do wait $child; done
+echo "ended"
+cmds ExecStopPost | while IFS= read -r c; do echo "post: $c"; sh -c "$c"; done
+rm -f "$P"
+SH
+    sudo tee "$ROOT/tmp/mpc-systemd-run" >/dev/null <<'SH'
+#!/bin/sh
+# systemd-run stand-in: runs the command as its own background session (in the foreground with --scope/--wait/--pipe).
+# Its output: /tmp/mpc-<unit>.log
+unit=run$$; fg=
+while [ $# -gt 0 ]; do
+    case "$1" in
+      --unit=*) unit=${1#--unit=} ;;
+      -u|--unit) shift; unit=$1 ;;
+      --scope|--wait|--pipe|-P|-t|--pty) fg=1 ;;
+      -p|-E|--property|--setenv|--uid|--gid|--slice|--description|--working-directory|--nice|-M|--machine|--on-active|--on-boot|--on-calendar) shift ;;
+      --) shift; break ;;
+      -*) ;;
+      *) break ;;
+    esac
+    shift
+done
+[ $# -gt 0 ] || exit 1
+unit=${unit%.service}
+[ -n "$fg" ] && exec "$@"
+setsid "$@" >"/tmp/mpc-$unit.log" 2>&1 </dev/null &
+echo "Running as unit: $unit.service" >&2
 SH
     printf '#!/bin/sh\nA=/media/az01-internal-sd/autorun\n[ -f "$A/autorun.sh" ] || { echo "no autorun.sh on the card"; exit 0; }\necho "running $A/autorun.sh"\ncd "$A" && /bin/sh "$A/autorun.sh"; echo "autorun.sh returned ($?)"\n' \
         | sudo tee "$ROOT/tmp/mpc-autorun" >/dev/null
-    sudo chmod 755 "$ROOT/tmp/mpc-systemctl" "$ROOT/tmp/mpc-autorun"
-    for S in /usr/bin/systemctl /bin/systemctl; do
-        [ -e "$ROOT$S" ] && { [ -e "$ROOT$S.mpcreal" ] || sudo cp -a "$ROOT$S" "$ROOT$S.mpcreal"; }
-        sudo ln -sf /tmp/mpc-systemctl "$ROOT$S" 2>/dev/null
+    sudo chmod 755 "$ROOT"/tmp/mpc-{systemctl,unit,systemd-run,autorun}
+    for S in /usr/bin/systemctl /bin/systemctl /usr/bin/systemd-run /bin/systemd-run; do
+        case "$(readlink "$ROOT$S" 2>/dev/null)" in /tmp/mpc-*) ;;   # ours already (a run that didn't finish)
+          *) [ -e "$ROOT$S" ] || [ -L "$ROOT$S" ] && { [ -e "$ROOT$S.mpcreal" ] || sudo cp -a "$ROOT$S" "$ROOT$S.mpcreal"; } ;; esac
+        sudo ln -sf "/tmp/mpc-${S##*/}" "$ROOT$S" 2>/dev/null
     done
     say "Booting like the hardware: the card's autorun, then the app"
     # devices for STATIC programs (SampleBoot's menu, many mod UIs), which the add-on can't reach: /dev/fb0 = a frame
