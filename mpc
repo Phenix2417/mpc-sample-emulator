@@ -608,7 +608,7 @@ cmd_run() {
 # systemctl stand-in (there is no systemd in the emulator). ac50.service is the MPC app (/run/ac50.stopped makes a
 # stop stick until a start); units an app writes to /run/systemd/system (Melodee's sample-base.service) are run by
 # /tmp/mpc-unit; anything else is accepted and ignored.
-app() { for p in /proc/[0-9]*; do [ "$(tr -d '\000' <"$p/comm" 2>/dev/null)" = "MPC Sample" ] && { echo "${p#/proc/}"; return 0; }; done; return 1; }
+app() { for p in /proc/[0-9]*; do [ "$(tr -d '\000' 2>/dev/null <"$p/comm")" = "MPC Sample" ] && { echo "${p#/proc/}"; return 0; }; done; return 1; }
 launch() {   # unless it runs or a start is under way (the app takes a few seconds)
     app >/dev/null && return 0
     s=$(cat /run/ac50.starting 2>/dev/null); [ -n "$s" ] && [ $(( $(date +%s) - s )) -lt 30 ] && return 0
@@ -651,7 +651,7 @@ exec >"/tmp/mpc-unit-$1.log" 2>&1
 echo $$ > "$P"
 cmds() { sed -n "s/^$1=//p" "$U" | sed 's/^[-@+!]*//'; }
 cmds ExecStartPre | while IFS= read -r c; do echo "pre: $c"; sh -c "$c"; done
-c=$(cmds ExecStart | head -1); echo "start: $c"
+c=$(cmds ExecStart | sed -n 1p); echo "start: $c"
 sh -c "exec $c" &
 child=$!
 trap 'kill -TERM $child 2>/dev/null' TERM INT
