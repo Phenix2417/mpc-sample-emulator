@@ -74,7 +74,8 @@ static void putu(char *b, int *n, unsigned v) { char t[12]; int m = 0; do { t[m+
 static void logs(const char *a, const char *b2, unsigned v) {
     int fd = real_open("/tmp/fbshim.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
     if (fd < 0) return;
-    char b[256]; int n = 0; put(b, &n, a); if (b2) { put(b, &n, " "); put(b, &n, b2); } put(b, &n, " "); putu(b, &n, v); b[n++] = '\n';
+    extern char *program_invocation_short_name;   /* which program wrote the line (the stock app, Melodee, devrelay...) */
+    char b[256]; int n = 0; put(b, &n, "["); put(b, &n, program_invocation_short_name); put(b, &n, "] "); put(b, &n, a); if (b2) { put(b, &n, " "); put(b, &n, b2); } put(b, &n, " "); putu(b, &n, v); b[n++] = '\n';
     syscall(SYS_write, fd, b, n); syscall(SYS_close, fd);
 }
 
